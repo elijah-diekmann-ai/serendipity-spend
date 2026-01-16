@@ -97,6 +97,11 @@ Add these:
 ENVIRONMENT=production
 SECRET_KEY=<generate-a-random-string>
 
+# Google OAuth (login)
+GOOGLE_OAUTH_CLIENT_ID=<from-google-cloud>
+GOOGLE_OAUTH_CLIENT_SECRET=<from-google-cloud>
+GOOGLE_OAUTH_ALLOWED_DOMAIN=serendipitycapital.com
+
 # Database (IMPORTANT: use psycopg driver)
 DATABASE_URL=postgresql+psycopg://${{ Postgres.PGUSER }}:${{ Postgres.PGPASSWORD }}@${{ Postgres.PGHOST }}:${{ Postgres.PGPORT }}/${{ Postgres.PGDATABASE }}
 
@@ -136,6 +141,8 @@ INIT_ADMIN_PASSWORD=<choose-a-strong-password>
 ```
 
 After you successfully log in once, **remove these two variables** and redeploy `web`.
+
+If you are using Google OAuth, you can also set **only** `INIT_ADMIN_EMAIL` (the app will generate a random password internally).
 
 ### 5.3 `web` service variable (Base URL)
 

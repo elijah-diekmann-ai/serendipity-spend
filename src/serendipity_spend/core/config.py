@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./serendipity.db"
     redis_url: str = "redis://localhost:6379/0"
 
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    google_oauth_allowed_domain: str | None = "serendipitycapital.com"
+
     storage_backend: Literal["local", "s3"] = "local"
     local_storage_path: Path = Path(".local_storage")
 
