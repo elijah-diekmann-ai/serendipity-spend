@@ -106,9 +106,9 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
     if user.role != UserRole.ADMIN and claim.employee_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
 
-    if claim.status != ClaimStatus.DRAFT:
+    if claim.status not in (ClaimStatus.DRAFT, ClaimStatus.PROCESSING):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Only draft claims can be deleted"
+            status_code=status.HTTP_409_CONFLICT, detail="Only draft or processing claims can be deleted"
         )
 
     # Delete related records first (foreign key constraints)
