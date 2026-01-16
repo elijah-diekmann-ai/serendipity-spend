@@ -46,7 +46,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 severity=PolicySeverity.FAIL,
                 title="Claim purpose required",
                 message="Add a purpose of the trip before submitting the claim.",
-                data={},
+                data={"submit_blocking": True},
             )
         )
 
@@ -60,7 +60,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 severity=PolicySeverity.FAIL,
                 title="Travel period required",
                 message="Add a travel start and end date before submitting the claim.",
-                data={},
+                data={"submit_blocking": True},
             )
         )
 
@@ -92,7 +92,11 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         "This document indicates it is not a payment receipt. "
                         "Upload a payment receipt or provide justification."
                     ),
-                    data={"vendor": "Uber", "receipt_type": "trip_summary"},
+                    data={
+                        "vendor": "Uber",
+                        "receipt_type": "trip_summary",
+                        "submit_blocking": False,
+                    },
                 )
             )
 
@@ -112,7 +116,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         "Confirm this expense is reimbursable and provide business context "
                         "if needed."
                     ),
-                    data={"profile": "PERSONAL"},
+                    data={"profile": "PERSONAL", "submit_blocking": False},
                 )
             )
 
@@ -132,6 +136,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                     data={
                         "from_currency": item.amount_original_currency,
                         "to_currency": claim.home_currency,
+                        "submit_blocking": True,
                     },
                 )
             )
@@ -153,7 +158,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         "This receipt was parsed using a generic heuristic. "
                         "Review the vendor/date/amount and mark it reviewed."
                     ),
-                    data={"extraction_method": "generic"},
+                    data={"extraction_method": "generic", "submit_blocking": True},
                 )
             )
 
@@ -175,7 +180,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         severity=PolicySeverity.NEEDS_INFO,
                         title="Hotel nights required",
                         message="Enter the number of hotel nights to check the nightly cap.",
-                        data={},
+                        data={"submit_blocking": True},
                     )
                 )
             else:
@@ -193,7 +198,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                                 "Set FX rates so the system can convert this hotel total to USD "
                                 "and check the USD 300/night cap."
                             ),
-                            data={},
+                            data={"submit_blocking": True},
                         )
                     )
                 else:
@@ -207,13 +212,17 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                                 rule_id="R103",
                                 severity=PolicySeverity.FAIL,
                                 title="Hotel nightly rate exceeds USD 300",
-                                message=(
-                                    f"Nightly rate is approx USD {nightly} (cap is USD 300). "
-                                    "Provide justification or adjust the claim."
-                                ),
-                                data={"nightly_usd": str(nightly), "cap_usd": "300.00"},
-                            )
+                            message=(
+                                f"Nightly rate is approx USD {nightly} (cap is USD 300). "
+                                "Provide justification or adjust the claim."
+                            ),
+                            data={
+                                "nightly_usd": str(nightly),
+                                "cap_usd": "300.00",
+                                "submit_blocking": True,
+                            },
                         )
+                    )
 
         # R111: meals over USD 100 require attendees
         if str(item.category or "").lower() in {"meals", "food", "food_and_beverage"}:
@@ -231,7 +240,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                             "Set FX rates so the system can determine whether this meal exceeds "
                             "USD 100 and requires attendee names."
                         ),
-                        data={},
+                        data={"submit_blocking": True},
                     )
                 )
             elif amount_usd >= Decimal("100.00"):
@@ -246,7 +255,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                             severity=PolicySeverity.NEEDS_INFO,
                             title="Meal attendees required (USD 100+)",
                             message="Enter attendee names (or a count) for meals over USD 100.",
-                            data={"threshold_usd": "100.00"},
+                            data={"threshold_usd": "100.00", "submit_blocking": True},
                         )
                     )
 
@@ -269,7 +278,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         severity=PolicySeverity.NEEDS_INFO,
                         title="Flight duration required",
                         message="Enter the flight duration in hours to check cabin class rules.",
-                        data={},
+                        data={"submit_blocking": True},
                     )
                 )
             if not cabin:
@@ -282,7 +291,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         severity=PolicySeverity.NEEDS_INFO,
                         title="Flight cabin class required",
                         message="Select the booked cabin class (economy, business, etc.).",
-                        data={},
+                        data={"submit_blocking": True},
                     )
                 )
             if duration_hours is not None and cabin and duration_hours < Decimal("6"):
@@ -299,7 +308,11 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                                 "Flights under 6 hours must be booked in economy class. "
                                 "Provide justification or adjust the claim."
                             ),
-                            data={"duration_hours": str(duration_hours), "cabin": cabin},
+                            data={
+                                "duration_hours": str(duration_hours),
+                                "cabin": cabin,
+                                "submit_blocking": True,
+                            },
                         )
                     )
 

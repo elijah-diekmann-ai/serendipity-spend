@@ -5,8 +5,9 @@ import uuid
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -406,6 +407,9 @@ def claim_detail(
         )
     )
 
+    submit_error = request.query_params.get("submit_error")
+    submit_ok = request.query_params.get("submit_ok")
+
     return templates.TemplateResponse(
         "claim_detail.html",
         {
@@ -419,6 +423,8 @@ def claim_detail(
             "violations": violations,
             "exports": exports,
             "fx_values": fx_values,
+            "submit_error": submit_error,
+            "submit_ok": submit_ok,
             "expense_categories": [
                 "transport",
                 "lodging",
@@ -690,9 +696,25 @@ def submit_claim_ui(
         from serendipity_spend.modules.claims.service import submit_claim
 
         submit_claim(session, claim=claim, user=user)
+        return RedirectResponse(url=f"/app/claims/{claim.id}?submit_ok=1", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Claim could not be submitted."
+        if isinstance(detail, dict):
+            message = str(detail.get("message") or message)
+            rules = detail.get("blocking_rules") or []
+            if rules:
+                message = f"{message} Blocking: {', '.join(rules)}."
+        elif isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?submit_error={quote(message)}", status_code=303
+        )
     except Exception:
-        pass
-    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?submit_error={quote('Claim could not be submitted.')}",
+            status_code=303,
+        )
 
 
 @router.post("/app/tasks/{task_id}/resolve", response_class=RedirectResponse)

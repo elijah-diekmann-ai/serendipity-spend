@@ -30,24 +30,33 @@
         <span class="muted">{{ claim.home_currency }}</span>
       </div>
     </div>
-    {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
-      <form method="post" action="/app/claims/{{ claim.id }}/submit">
-        <button class="btn btn-primary" type="submit">
-          {% if claim.status.value == 'CHANGES_REQUESTED' %}Resubmit{% else %}Submit for review{% endif %}
-        </button>
+    <div class="btn-row">
+      <form method="post" action="/app/claims/{{ claim.id }}/export">
+        <button class="btn" type="submit">Export</button>
       </form>
-    {% endif %}
-    {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
-      <div class="btn-row">
+      {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
+        <form method="post" action="/app/claims/{{ claim.id }}/submit">
+          <button class="btn btn-primary" type="submit">
+            {% if claim.status.value == 'CHANGES_REQUESTED' %}Resubmit{% else %}Submit for review{% endif %}
+          </button>
+        </form>
+      {% endif %}
+      {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
         <form method="post" action="/app/claims/{{ claim.id }}/approve">
           <button class="btn btn-primary" type="submit">Approve</button>
         </form>
         <form method="post" action="/app/claims/{{ claim.id }}/request-changes">
           <button class="btn" type="submit">Request changes</button>
         </form>
-      </div>
-    {% endif %}
+      {% endif %}
+    </div>
   </div>
+
+  {% if submit_error %}
+    <div class="callout error mb-2">{{ submit_error }}</div>
+  {% elif submit_ok %}
+    <div class="callout success mb-2">Claim submitted.</div>
+  {% endif %}
 
   <!-- Two column layout -->
   <div class="workspace">
@@ -327,25 +336,6 @@
     <!-- Sidebar -->
     <aside class="workspace-sidebar">
 
-      <!-- Tasks -->
-      {% if tasks|length > 0 %}
-      <div class="sidebar-card">
-        <h3 class="sidebar-label">To do</h3>
-        <div class="task-list">
-          {% for t in tasks %}
-            {% if t.status.value == 'OPEN' %}
-            <div class="task-item">
-              <span>{{ t.title }}</span>
-              <form method="post" action="/app/tasks/{{ t.id }}/resolve">
-                <input type="hidden" name="claim_id" value="{{ claim.id }}" />
-                <button class="btn btn-xs" type="submit">Done</button>
-              </form>
-            </div>
-            {% endif %}
-          {% endfor %}
-        </div>
-      </div>
-      {% endif %}
 
       <!-- FX Rates -->
       <div class="sidebar-card">
@@ -362,31 +352,23 @@
         </form>
       </div>
 
-      <!-- Export -->
+      <!-- Downloads (after export) -->
+      {% if exports|length > 0 %}
       <div class="sidebar-card">
-        <h3 class="sidebar-label">Export</h3>
-        <form method="post" action="/app/claims/{{ claim.id }}/export">
-          <button class="btn btn-sm" type="submit" style="width:100%;">Generate</button>
-        </form>
-        {% if exports|length > 0 %}
-          <div class="export-links mt-1">
-            {% for e in exports %}
-              {% if e.status.value == 'COMPLETED' %}
-                {% if e.summary_xlsx_key %}<a href="/app/exports/{{ e.id }}/download/summary" class="export-link">Summary.xlsx</a>{% endif %}
-                {% if e.supporting_pdf_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.pdf</a>{% elif e.supporting_zip_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.zip</a>{% endif %}
-              {% endif %}
-            {% endfor %}
-          </div>
-        {% endif %}
+        <h3 class="sidebar-label">Downloads</h3>
+        <div class="export-links">
+          {% for e in exports %}
+            {% if e.status.value == 'COMPLETED' %}
+              {% if e.summary_xlsx_key %}<a href="/app/exports/{{ e.id }}/download/summary" class="export-link">Summary.xlsx</a>{% endif %}
+              {% if e.supporting_pdf_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.pdf</a>{% elif e.supporting_zip_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.zip</a>{% endif %}
+            {% endif %}
+          {% endfor %}
+        </div>
       </div>
+      {% endif %}
 
       <!-- Actions -->
       <div class="sidebar-card sidebar-card--muted">
-        {% if user.role.value == 'ADMIN' and not claim.approver_id %}
-          <form method="post" action="/app/claims/{{ claim.id }}/route-to-me" class="mb-1">
-            <button class="btn btn-sm" type="submit" style="width:100%;">Route to me</button>
-          </form>
-        {% endif %}
         {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
           <form method="post" action="/app/claims/{{ claim.id }}/reject" class="mb-1">
             <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Reject</button>

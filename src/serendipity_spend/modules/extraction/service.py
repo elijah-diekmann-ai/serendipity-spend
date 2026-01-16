@@ -64,8 +64,10 @@ def extract_source_file(*, source_file_id: str) -> None:
                 _process_pdf_bundle(session=session, claim=claim, source=source, body=body)
             elif _is_supported_image(source.filename, source.content_type):
                 _process_image(session=session, claim=claim, source=source, body=body)
+            elif _is_supported_text(source.filename, source.content_type):
+                _process_text(session=session, claim=claim, source=source, body=body)
             else:
-                raise ValueError("Unsupported file type (v1 supports PDF and image receipts)")
+                raise ValueError("Unsupported file type (v1 supports PDF, images, and text)")
 
             from serendipity_spend.modules.policy.service import evaluate_claim
 
@@ -109,6 +111,7 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
         return
 
     parsed_count = 0
+    failed_segments: list[Segment] = []
     for seg in segments:
         seg_text = "\n\n".join(pages[seg.start_page_idx : seg.end_page_idx + 1])
         text_hash = hashlib.sha256(seg_text.encode("utf-8", errors="ignore")).hexdigest()
@@ -128,86 +131,49 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
 
         parsed = _parse_segment(seg=seg, pages=pages)
         if not parsed:
+            parsed = _parse_generic_receipt(seg_text, extraction_method="generic_fallback")
+        if not parsed:
+            failed_segments.append(seg)
             continue
+
+        _upsert_item_and_link_evidence(
+            session=session,
+            claim=claim,
+            evidence=evidence,
+            parsed=parsed,
+            text_hash=text_hash,
+        )
         parsed_count += 1
 
-        amount_home, fx_rate_to_home = _convert_to_home(
-            session=session,
-            claim_id=claim.id,
-            from_currency=parsed.currency,
-            to_currency=claim.home_currency,
-            amount=parsed.amount,
-        )
-
-        dedupe_key = _dedupe_key(parsed.vendor, parsed.vendor_reference, text_hash)
-
-        item = session.scalar(
-            select(ExpenseItem).where(
-                ExpenseItem.claim_id == claim.id, ExpenseItem.dedupe_key == dedupe_key
-            )
-        )
-        if not item:
-            item = ExpenseItem(
-                claim_id=claim.id,
-                vendor=parsed.vendor,
-                vendor_reference=parsed.vendor_reference,
-                receipt_type=parsed.receipt_type,
-                category=parsed.category,
-                description=parsed.description,
-                transaction_date=parsed.transaction_date,
-                transaction_at=None,
-                amount_original_amount=parsed.amount,
-                amount_original_currency=parsed.currency,
-                amount_home_amount=amount_home,
-                amount_home_currency=claim.home_currency,
-                fx_rate_to_home=fx_rate_to_home,
-                metadata_json=parsed.metadata,
-                dedupe_key=dedupe_key,
-            )
-            session.add(item)
-            session.flush()
-
-        # link evidence
-        existing_link = session.scalar(
-            select(ExpenseItemEvidence).where(
-                ExpenseItemEvidence.expense_item_id == item.id,
-                ExpenseItemEvidence.evidence_document_id == evidence.id,
-            )
-        )
-        if not existing_link:
-            session.add(
-                ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id)
-            )
-
     uncovered = _uncovered_page_idxs(page_count=len(pages), segments=segments)
+    parsed_uncovered = 0
+    unhandled_uncovered: list[int] = []
     if uncovered:
-        for idx in uncovered:
-            page_text = pages[idx]
-            page_text_hash = hashlib.sha256(page_text.encode("utf-8", errors="ignore")).hexdigest()
-            session.add(
-                EvidenceDocument(
-                    source_file_id=source.id,
-                    page_start=idx + 1,
-                    page_end=idx + 1,
-                    vendor="Unknown",
-                    receipt_type="unknown",
-                    extracted_text=page_text,
-                    text_hash=page_text_hash,
-                    classification_confidence=0.0,
-                )
-            )
+        parsed_uncovered, unhandled_uncovered = _process_page_ranges(
+            session=session,
+            claim=claim,
+            source=source,
+            pages=pages,
+            page_idxs=uncovered,
+        )
+
+    total_parsed = parsed_count + parsed_uncovered
+    if unhandled_uncovered or failed_segments:
+        parts: list[str] = []
+        if unhandled_uncovered:
+            parts.append(f"{len(unhandled_uncovered)} page(s) could not be parsed")
+        if failed_segments:
+            parts.append(f"{len(failed_segments)} recognized segment(s) could not be parsed")
         _sync_extraction_task(
             session=session,
             claim=claim,
             source=source,
             status=TaskStatus.OPEN,
             title=f"Manual review needed: {source.filename}",
-            description=(
-                f"{len(uncovered)} page(s) in this PDF were not recognized. "
-                "Add missing line items manually or upload clearer documents."
-            ),
+            description="; ".join(parts)
+            + ". Add missing line items manually or upload clearer documents.",
         )
-    elif parsed_count > 0:
+    elif total_parsed > 0:
         _sync_extraction_task(
             session=session,
             claim=claim,
@@ -216,7 +182,7 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
             title=f"Manual review needed: {source.filename}",
             description=None,
         )
-    elif parsed_count == 0:
+    else:
         _sync_extraction_task(
             session=session,
             claim=claim,
@@ -268,51 +234,13 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         session.commit()
         return
 
-    amount_home, fx_rate_to_home = _convert_to_home(
+    _upsert_item_and_link_evidence(
         session=session,
-        claim_id=claim.id,
-        from_currency=parsed.currency,
-        to_currency=claim.home_currency,
-        amount=parsed.amount,
+        claim=claim,
+        evidence=evidence,
+        parsed=parsed,
+        text_hash=text_hash,
     )
-
-    dedupe_key = _dedupe_key(parsed.vendor, parsed.vendor_reference, text_hash)
-
-    item = session.scalar(
-        select(ExpenseItem).where(
-            ExpenseItem.claim_id == claim.id,
-            ExpenseItem.dedupe_key == dedupe_key,
-        )
-    )
-    if not item:
-        item = ExpenseItem(
-            claim_id=claim.id,
-            vendor=parsed.vendor,
-            vendor_reference=parsed.vendor_reference,
-            receipt_type=parsed.receipt_type,
-            category=parsed.category,
-            description=parsed.description,
-            transaction_date=parsed.transaction_date,
-            transaction_at=None,
-            amount_original_amount=parsed.amount,
-            amount_original_currency=parsed.currency,
-            amount_home_amount=amount_home,
-            amount_home_currency=claim.home_currency,
-            fx_rate_to_home=fx_rate_to_home,
-            metadata_json=parsed.metadata,
-            dedupe_key=dedupe_key,
-        )
-        session.add(item)
-        session.flush()
-
-    existing_link = session.scalar(
-        select(ExpenseItemEvidence).where(
-            ExpenseItemEvidence.expense_item_id == item.id,
-            ExpenseItemEvidence.evidence_document_id == evidence.id,
-        )
-    )
-    if not existing_link:
-        session.add(ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id))
 
     _sync_extraction_task(
         session=session,
@@ -323,6 +251,100 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         description=None,
     )
     session.commit()
+
+
+def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> None:
+    text = _decode_text_bytes(body=body, filename=source.filename, content_type=source.content_type)
+    if not text.strip():
+        _sync_extraction_task(
+            session=session,
+            claim=claim,
+            source=source,
+            status=TaskStatus.OPEN,
+            title=f"Manual review needed: {source.filename}",
+            description="No text could be extracted from this file.",
+        )
+        session.commit()
+        return
+
+    vendor, receipt_type, confidence = _classify_text(text)
+    parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    if not parsed:
+        parsed = _parse_generic_receipt(text, extraction_method="generic")
+
+    if parsed and vendor == "Unknown":
+        vendor = parsed.vendor
+        receipt_type = parsed.receipt_type
+        confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
+
+    text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    evidence = EvidenceDocument(
+        source_file_id=source.id,
+        page_start=None,
+        page_end=None,
+        vendor=vendor,
+        receipt_type=receipt_type,
+        extracted_text=text,
+        text_hash=text_hash,
+        classification_confidence=confidence,
+    )
+    session.add(evidence)
+    session.flush()
+
+    if not parsed:
+        _sync_extraction_task(
+            session=session,
+            claim=claim,
+            source=source,
+            status=TaskStatus.OPEN,
+            title=f"Manual review needed: {source.filename}",
+            description="No expense item could be extracted from this text file.",
+        )
+        session.commit()
+        return
+
+    _upsert_item_and_link_evidence(
+        session=session,
+        claim=claim,
+        evidence=evidence,
+        parsed=parsed,
+        text_hash=text_hash,
+    )
+
+    _sync_extraction_task(
+        session=session,
+        claim=claim,
+        source=source,
+        status=TaskStatus.RESOLVED,
+        title=f"Manual review needed: {source.filename}",
+        description=None,
+    )
+    session.commit()
+
+
+def _decode_text_bytes(*, body: bytes, filename: str, content_type: str | None) -> str:
+    ctype = (content_type or "").lower()
+    is_html = ctype.startswith("text/html") or filename.lower().endswith((".html", ".htm"))
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        text = body.decode("latin-1", errors="replace")
+    if is_html:
+        text = _html_to_text(text)
+    return text
+
+
+def _html_to_text(html: str) -> str:
+    from html import unescape
+
+    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</p\s*>", "\n\n", html)
+    html = re.sub(r"(?i)</div\s*>", "\n", html)
+    html = re.sub(r"(?s)<[^>]+>", "", html)
+    html = unescape(html)
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in html.splitlines()]
+    return "\n".join([ln for ln in lines if ln])
 
 
 def _extract_pdf_pages(body: bytes) -> list[str]:
@@ -503,38 +525,14 @@ def _convert_to_home(
     return (amount * fx.rate).quantize(Decimal("0.01")), fx.rate
 
 
-def _process_unknown_pdf(*, session, claim: Claim, source: SourceFile, pages: list[str]) -> None:
-    seg_text = "\n\n".join(pages)
-    text_hash = hashlib.sha256(seg_text.encode("utf-8", errors="ignore")).hexdigest()
-    evidence = EvidenceDocument(
-        source_file_id=source.id,
-        page_start=1 if pages else None,
-        page_end=len(pages) if pages else None,
-        vendor="Unknown",
-        receipt_type="unknown",
-        extracted_text=seg_text,
-        text_hash=text_hash,
-        classification_confidence=0.0,
-    )
-    session.add(evidence)
-    session.flush()
-
-    parsed = _parse_generic_receipt(seg_text)
-    if not parsed:
-        _sync_extraction_task(
-            session=session,
-            claim=claim,
-            source=source,
-            status=TaskStatus.OPEN,
-            title=f"Manual review needed: {source.filename}",
-            description=(
-                "This PDF format was not recognized. "
-                "Add a line item manually or upload a more standard receipt/invoice."
-            ),
-        )
-        session.commit()
-        return
-
+def _upsert_item_and_link_evidence(
+    *,
+    session,
+    claim: Claim,
+    evidence: EvidenceDocument,
+    parsed,
+    text_hash: str,
+) -> ExpenseItem:
     amount_home, fx_rate_to_home = _convert_to_home(
         session=session,
         claim_id=claim.id,
@@ -578,18 +576,53 @@ def _process_unknown_pdf(*, session, claim: Claim, source: SourceFile, pages: li
         )
     )
     if not existing_link:
-        session.add(
-            ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id)
-        )
+        session.add(ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id))
 
-    _sync_extraction_task(
+    return item
+
+
+def _process_unknown_pdf(*, session, claim: Claim, source: SourceFile, pages: list[str]) -> None:
+    parsed_items, unhandled = _process_page_ranges(
         session=session,
         claim=claim,
         source=source,
-        status=TaskStatus.RESOLVED,
-        title=f"Manual review needed: {source.filename}",
-        description=None,
+        pages=pages,
+        page_idxs=list(range(len(pages))),
     )
+
+    if unhandled:
+        _sync_extraction_task(
+            session=session,
+            claim=claim,
+            source=source,
+            status=TaskStatus.OPEN,
+            title=f"Manual review needed: {source.filename}",
+            description=(
+                f"{len(unhandled)} page(s) could not be parsed. "
+                "Add missing line items manually or upload clearer documents."
+            ),
+        )
+    elif parsed_items > 0:
+        _sync_extraction_task(
+            session=session,
+            claim=claim,
+            source=source,
+            status=TaskStatus.RESOLVED,
+            title=f"Manual review needed: {source.filename}",
+            description=None,
+        )
+    else:
+        _sync_extraction_task(
+            session=session,
+            claim=claim,
+            source=source,
+            status=TaskStatus.OPEN,
+            title=f"Manual review needed: {source.filename}",
+            description=(
+                "This PDF format was not recognized. "
+                "Add a line item manually or upload a more standard receipt/invoice."
+            ),
+        )
     session.commit()
 
 
@@ -600,26 +633,266 @@ def _uncovered_page_idxs(*, page_count: int, segments: list[Segment]) -> list[in
     return [i for i in range(page_count) if i not in covered]
 
 
-def _parse_generic_receipt(text: str):
+def _group_consecutive_page_idxs(page_idxs: list[int]) -> list[tuple[int, int]]:
+    if not page_idxs:
+        return []
+    sorted_idxs = sorted(set(page_idxs))
+    ranges: list[tuple[int, int]] = []
+    start = prev = sorted_idxs[0]
+    for idx in sorted_idxs[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        ranges.append((start, prev))
+        start = prev = idx
+    ranges.append((start, prev))
+    return ranges
+
+
+def _add_evidence_document(
+    *,
+    session,
+    source: SourceFile,
+    page_start: int | None,
+    page_end: int | None,
+    vendor: str,
+    receipt_type: str,
+    extracted_text: str,
+    confidence: float,
+) -> tuple[EvidenceDocument, str]:
+    text_hash = hashlib.sha256(extracted_text.encode("utf-8", errors="ignore")).hexdigest()
+    evidence = EvidenceDocument(
+        source_file_id=source.id,
+        page_start=page_start,
+        page_end=page_end,
+        vendor=vendor,
+        receipt_type=receipt_type,
+        extracted_text=extracted_text,
+        text_hash=text_hash,
+        classification_confidence=confidence,
+    )
+    session.add(evidence)
+    session.flush()
+    return evidence, text_hash
+
+
+def _process_page_ranges(
+    *,
+    session,
+    claim: Claim,
+    source: SourceFile,
+    pages: list[str],
+    page_idxs: list[int],
+) -> tuple[int, list[int]]:
+    parsed_items = 0
+    unhandled_page_idxs: list[int] = []
+
+    for start, end in _group_consecutive_page_idxs(page_idxs):
+        if start == end:
+            page_text = pages[start]
+            vendor, receipt_type, confidence = _classify_text(page_text)
+            parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
+            if not parsed:
+                parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
+
+            if parsed:
+                if vendor == "Unknown":
+                    vendor = parsed.vendor
+                if receipt_type == "unknown":
+                    receipt_type = parsed.receipt_type
+                confidence = max(
+                    confidence, float(parsed.metadata.get("extraction_confidence") or 0.0)
+                )
+
+            evidence, text_hash = _add_evidence_document(
+                session=session,
+                source=source,
+                page_start=start + 1,
+                page_end=start + 1,
+                vendor=vendor if parsed else "Unknown",
+                receipt_type=receipt_type if parsed else "unknown",
+                extracted_text=page_text,
+                confidence=confidence if parsed else 0.0,
+            )
+            if parsed:
+                _upsert_item_and_link_evidence(
+                    session=session,
+                    claim=claim,
+                    evidence=evidence,
+                    parsed=parsed,
+                    text_hash=text_hash,
+                )
+                parsed_items += 1
+            else:
+                unhandled_page_idxs.append(start)
+            continue
+
+        per_page_parsed: list[tuple[int, object, str, str, float]] = []
+        for idx in range(start, end + 1):
+            page_text = pages[idx]
+            vendor, receipt_type, confidence = _classify_text(page_text)
+            parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
+            if not parsed:
+                parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
+            if not parsed:
+                continue
+            if vendor == "Unknown":
+                vendor = parsed.vendor
+            if receipt_type == "unknown":
+                receipt_type = parsed.receipt_type
+            confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
+            per_page_parsed.append((idx, parsed, vendor, receipt_type, confidence))
+
+        if len(per_page_parsed) >= 2:
+            parsed_by_idx = {idx for idx, *_ in per_page_parsed}
+            for idx, parsed, vendor, receipt_type, confidence in per_page_parsed:
+                page_text = pages[idx]
+                evidence, text_hash = _add_evidence_document(
+                    session=session,
+                    source=source,
+                    page_start=idx + 1,
+                    page_end=idx + 1,
+                    vendor=vendor,
+                    receipt_type=receipt_type,
+                    extracted_text=page_text,
+                    confidence=confidence,
+                )
+                _upsert_item_and_link_evidence(
+                    session=session,
+                    claim=claim,
+                    evidence=evidence,
+                    parsed=parsed,
+                    text_hash=text_hash,
+                )
+                parsed_items += 1
+
+            for idx in range(start, end + 1):
+                if idx in parsed_by_idx:
+                    continue
+                page_text = pages[idx]
+                _add_evidence_document(
+                    session=session,
+                    source=source,
+                    page_start=idx + 1,
+                    page_end=idx + 1,
+                    vendor="Unknown",
+                    receipt_type="unknown",
+                    extracted_text=page_text,
+                    confidence=0.0,
+                )
+                unhandled_page_idxs.append(idx)
+            continue
+
+        combined_text = "\n\n".join(pages[start : end + 1])
+        vendor, receipt_type, confidence = _classify_text(combined_text)
+        parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=combined_text)
+        if not parsed:
+            parsed = _parse_generic_receipt(combined_text, extraction_method="generic_multi_page")
+
+        if parsed:
+            if vendor == "Unknown":
+                vendor = parsed.vendor
+            if receipt_type == "unknown":
+                receipt_type = parsed.receipt_type
+            confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
+            evidence, text_hash = _add_evidence_document(
+                session=session,
+                source=source,
+                page_start=start + 1,
+                page_end=end + 1,
+                vendor=vendor,
+                receipt_type=receipt_type,
+                extracted_text=combined_text,
+                confidence=confidence,
+            )
+            _upsert_item_and_link_evidence(
+                session=session,
+                claim=claim,
+                evidence=evidence,
+                parsed=parsed,
+                text_hash=text_hash,
+            )
+            parsed_items += 1
+            continue
+
+        if per_page_parsed:
+            idx, parsed, vendor, receipt_type, confidence = per_page_parsed[0]
+            page_text = pages[idx]
+            evidence, text_hash = _add_evidence_document(
+                session=session,
+                source=source,
+                page_start=idx + 1,
+                page_end=idx + 1,
+                vendor=vendor,
+                receipt_type=receipt_type,
+                extracted_text=page_text,
+                confidence=confidence,
+            )
+            _upsert_item_and_link_evidence(
+                session=session,
+                claim=claim,
+                evidence=evidence,
+                parsed=parsed,
+                text_hash=text_hash,
+            )
+            parsed_items += 1
+            for other_idx in range(start, end + 1):
+                if other_idx == idx:
+                    continue
+                other_text = pages[other_idx]
+                _add_evidence_document(
+                    session=session,
+                    source=source,
+                    page_start=other_idx + 1,
+                    page_end=other_idx + 1,
+                    vendor="Unknown",
+                    receipt_type="unknown",
+                    extracted_text=other_text,
+                    confidence=0.0,
+                )
+                unhandled_page_idxs.append(other_idx)
+            continue
+
+        for idx in range(start, end + 1):
+            page_text = pages[idx]
+            _add_evidence_document(
+                session=session,
+                source=source,
+                page_start=idx + 1,
+                page_end=idx + 1,
+                vendor="Unknown",
+                receipt_type="unknown",
+                extracted_text=page_text,
+                confidence=0.0,
+            )
+            unhandled_page_idxs.append(idx)
+
+    return parsed_items, unhandled_page_idxs
+
+
+def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
     total = _extract_total_amount(text)
     if not total:
         return None
     currency, amount = total
     tx_date = _extract_any_date(text)
     vendor = _extract_vendor_name(text) or "Unknown"
+    category = _guess_category(text)
+    nights = _extract_hotel_nights(text) if category == "lodging" else None
     return _GenericParsedExpense(
         vendor=vendor,
         vendor_reference=None,
         receipt_type="generic_receipt",
-        category=None,
+        category=category,
         description=f"Receipt: {vendor}" if vendor else "Receipt",
         transaction_date=tx_date,
         amount=amount,
         currency=currency,
         metadata={
-            "extraction_method": "generic",
+            "extraction_method": extraction_method,
             "extraction_confidence": 0.3,
             "employee_reviewed": False,
+            **({"hotel_nights": nights} if nights else {}),
         },
     )
 
@@ -637,36 +910,95 @@ class _GenericParsedExpense:
     metadata: dict
 
 
+def _guess_category(text: str) -> str | None:
+    t = text.lower()
+    if any(k in t for k in ("hotel", "room rate", "check-in", "check in", "check-out", "folio")):
+        return "lodging"
+    if any(k in t for k in ("flight", "boarding pass", "itinerary", "e-ticket", "ticket number")):
+        return "airfare"
+    return None
+
+
+def _extract_hotel_nights(text: str) -> int | None:
+    t = text.lower()
+    if "night" not in t and "nights" not in t:
+        return None
+    m = re.search(r"\b([0-9]{1,2})\s+nights?\b", t)
+    if m:
+        try:
+            nights = int(m.group(1))
+            return nights if nights > 0 else None
+        except ValueError:
+            return None
+    m = re.search(r"\bnights?\s*[:#]?\s*([0-9]{1,2})\b", t)
+    if m:
+        try:
+            nights = int(m.group(1))
+            return nights if nights > 0 else None
+        except ValueError:
+            return None
+    return None
+
+
 def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    keyword_re = re.compile(r"\b(total|total paid|grand total|amount due|balance due)\b", re.I)
+    keyword_re = re.compile(
+        r"\b("
+        r"total|total paid|grand total|amount due|balance due|amount paid|amount charged|"
+        r"total amount|total price|total fare|total charge|total charges"
+        r")\b",
+        re.I,
+    )
     candidates: list[tuple[str, Decimal]] = []
 
-    for ln in lines:
-        if not keyword_re.search(ln):
-            continue
-
+    def add_candidates_from_line(ln: str) -> None:
         # Prefer explicit currency codes (optionally with a currency symbol).
         for m in re.finditer(
-            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,]*\.[0-9]{2})\b",
+            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
             ln,
         ):
             cur, amt = m.groups()
-            candidates.append((cur.upper(), Decimal(amt.replace(",", ""))))
+            try:
+                candidates.append((cur.upper(), Decimal(amt.replace(",", ""))))
+            except Exception:
+                continue
 
         # Symbol-prefixed amounts.
-        for m in re.finditer(r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,]*\.[0-9]{2})\b", ln):
+        for m in re.finditer(
+            r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b", ln
+        ):
             sym, amt = m.groups()
             cur = {"$": "USD", "US$": "USD", "CA$": "CAD", "£": "GBP", "€": "EUR"}.get(sym, "USD")
-            candidates.append((cur, Decimal(amt.replace(",", ""))))
+            try:
+                candidates.append((cur, Decimal(amt.replace(",", ""))))
+            except Exception:
+                continue
 
         # Amount followed by currency code.
-        for m in re.finditer(r"\b([0-9][0-9,]*\.[0-9]{2})\s*([A-Z]{3})\b", ln):
+        for m in re.finditer(
+            r"\b([0-9][0-9,]*(?:\.[0-9]{2})?)\s*([A-Z]{3})\b",
+            ln,
+        ):
             amt, cur = m.groups()
-            candidates.append((cur.upper(), Decimal(amt.replace(",", ""))))
+            try:
+                candidates.append((cur.upper(), Decimal(amt.replace(",", ""))))
+            except Exception:
+                continue
+
+    for i, ln in enumerate(lines):
+        if not keyword_re.search(ln):
+            continue
+
+        add_candidates_from_line(ln)
+        if i + 1 < len(lines):
+            add_candidates_from_line(lines[i + 1])
 
     if not candidates:
-        return None
+        # Fallback: largest amount that looks currency-denominated anywhere in the document.
+        for ln in lines:
+            add_candidates_from_line(ln)
+        if not candidates:
+            return None
     # Use the largest amount found on "total" lines.
     return max(candidates, key=lambda x: x[1])
 
@@ -697,6 +1029,33 @@ def _extract_any_date(text: str):
         for fmt in ("%b %d, %Y", "%B %d, %Y"):
             try:
                 return datetime.strptime(s, fmt).date()
+            except ValueError:
+                continue
+
+    # 31AUG25
+    m = re.search(r"\b([0-9]{2}[A-Za-z]{3}[0-9]{2})\b", text)
+    if m:
+        try:
+            return datetime.strptime(m.group(1).title(), "%d%b%y").date()
+        except ValueError:
+            pass
+
+    # 12/31/2025 or 31/12/2025
+    m = re.search(r"\b([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\b", text)
+    if m:
+        s = m.group(1)
+        a, b, c = s.split("/")
+        try:
+            aa, bb, _ = int(a), int(b), int(c)
+        except ValueError:
+            aa = bb = 0
+        # Prefer month/day when unambiguous, otherwise try day/month.
+        for fmt in (("%m/%d/%Y", aa <= 12 and bb <= 31), ("%d/%m/%Y", bb <= 12 and aa <= 31)):
+            f, ok = fmt
+            if not ok:
+                continue
+            try:
+                return datetime.strptime(s, f).date()
             except ValueError:
                 continue
 
@@ -772,3 +1131,10 @@ def _is_supported_image(filename: str, content_type: str | None) -> bool:
     if (content_type or "").lower().startswith("image/"):
         return True
     return filename.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"))
+
+
+def _is_supported_text(filename: str, content_type: str | None) -> bool:
+    ctype = (content_type or "").lower()
+    if ctype.startswith("text/plain") or ctype.startswith("text/html"):
+        return True
+    return filename.lower().endswith((".txt", ".md", ".html", ".htm"))
