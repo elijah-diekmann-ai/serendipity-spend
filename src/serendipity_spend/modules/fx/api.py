@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from serendipity_spend.api.deps import get_current_user
@@ -26,15 +26,18 @@ def set_fx_rates(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     out: list[FxRateOut] = []
     for r in payload:
-        fx = upsert_fx_rate(
-            session,
-            claim_id=claim.id,
-            from_currency=r.from_currency,
-            to_currency=r.to_currency,
-            rate=r.rate,
-            as_of_date=r.as_of_date,
-            source=r.source,
-        )
+        try:
+            fx = upsert_fx_rate(
+                session,
+                claim_id=claim.id,
+                from_currency=r.from_currency,
+                to_currency=r.to_currency,
+                rate=r.rate,
+                as_of_date=r.as_of_date,
+                source=r.source,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
         out.append(FxRateOut.model_validate(fx, from_attributes=True))
 
     apply_fx_to_claim_items(session, claim_id=claim.id)

@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from serendipity_spend.core.currencies import normalize_currency
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
 from serendipity_spend.modules.fx.models import FxRate
@@ -44,8 +45,12 @@ def create_manual_item(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Vendor is required")
 
     amount_original_currency = amount_original_currency.strip().upper()
+    amount_original_currency = normalize_currency(amount_original_currency)
     if not amount_original_currency:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Currency is required")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Currency must be a valid ISO-4217 code",
+        )
 
     amount_home_amount, fx_rate_to_home = _convert_to_home(
         session=session,
@@ -127,11 +132,13 @@ def update_expense_item(
         recalc_fx = True
     if "amount_original_currency" in changes:
         currency = str(changes["amount_original_currency"] or "").strip().upper()
-        if not currency:
+        currency_norm = normalize_currency(currency)
+        if not currency_norm:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Currency is required"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Currency must be a valid ISO-4217 code",
             )
-        item.amount_original_currency = currency
+        item.amount_original_currency = currency_norm
         recalc_fx = True
 
     if "metadata_json" in changes:

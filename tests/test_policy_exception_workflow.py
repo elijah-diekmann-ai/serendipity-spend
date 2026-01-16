@@ -26,9 +26,8 @@ from serendipity_spend.modules.policy.service import (
     evaluate_claim,
     request_policy_exception,
 )
-from serendipity_spend.modules.workflow.models import Task, TaskStatus
+from serendipity_spend.modules.workflow.models import ApprovalDecision, Task, TaskStatus
 from serendipity_spend.modules.workflow.service import approve_claim
-from serendipity_spend.modules.workflow.models import ApprovalDecision
 
 
 def test_submit_allows_exception_request_for_fail_rule():
@@ -91,7 +90,9 @@ def test_submit_allows_exception_request_for_fail_rule():
         # The corresponding policy task should be routed to the approver.
         task = session.scalar(
             select(Task).where(
-                Task.claim_id == claim.id, Task.type == "POLICY_R103", Task.status == TaskStatus.OPEN
+                Task.claim_id == claim.id,
+                Task.type == "POLICY_R103",
+                Task.status == TaskStatus.OPEN,
             )
         )
         assert task
@@ -150,7 +151,8 @@ def test_approver_must_decide_exception_before_approving_claim():
 
         exc = session.scalar(
             select(PolicyException).where(
-                PolicyException.claim_id == claim.id, PolicyException.status == PolicyExceptionStatus.REQUESTED
+                PolicyException.claim_id == claim.id,
+                PolicyException.status == PolicyExceptionStatus.REQUESTED,
             )
         )
         assert exc
@@ -233,7 +235,8 @@ def test_export_xlsx_includes_policy_flags_column():
         open_violations = list(
             session.scalars(
                 select(PolicyViolation).where(
-                    PolicyViolation.claim_id == claim.id, PolicyViolation.status == ViolationStatus.OPEN
+                    PolicyViolation.claim_id == claim.id,
+                    PolicyViolation.status == ViolationStatus.OPEN,
                 )
             )
         )

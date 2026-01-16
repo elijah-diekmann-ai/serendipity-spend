@@ -15,6 +15,7 @@ os.environ.setdefault("LOCAL_STORAGE_PATH", ".tmp_storage_test")
 
 @pytest.fixture(autouse=True)
 def _reset_db_and_storage() -> None:
+    import serendipity_spend.models  # noqa: F401
     from serendipity_spend.core.db import engine
     from serendipity_spend.core.models import Base
 

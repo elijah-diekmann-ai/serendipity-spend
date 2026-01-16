@@ -45,12 +45,14 @@ def test_auto_upsert_fx_rates_applies_to_items(monkeypatch):
         )
         assert item.amount_home_amount is None
 
-        fx_service.auto_upsert_fx_rates(
+        rates, skipped = fx_service.auto_upsert_fx_rates(
             session,
             claim_id=claim.id,
             to_currency="SGD",
             from_currencies=["USD"],
         )
+        assert skipped == []
+        assert rates
 
         fx = session.scalar(
             select(FxRate).where(
@@ -68,3 +70,33 @@ def test_auto_upsert_fx_rates_applies_to_items(monkeypatch):
         assert item.amount_home_amount == Decimal("12.50")
         assert item.fx_rate_to_home == Decimal("1.25")
 
+
+def test_auto_upsert_fx_rates_skips_invalid_currency_codes(monkeypatch):
+    from serendipity_spend.modules.fx import service as fx_service
+
+    calls: list[tuple[str, str]] = []
+
+    def _fake_fetch(*, from_currency, to_currency):
+        calls.append((from_currency, to_currency))
+        return Decimal("2.00"), date(2026, 1, 1)
+
+    monkeypatch.setattr(fx_service, "_fetch_frankfurter_rate", _fake_fetch)
+
+    with SessionLocal() as session:
+        employee = create_user(
+            session,
+            email="employee@example.com",
+            password="pw",
+            role=UserRole.EMPLOYEE,
+        )
+        claim = create_claim(session, employee_id=employee.id, home_currency="USD")
+
+        rates, skipped = fx_service.auto_upsert_fx_rates(
+            session,
+            claim_id=claim.id,
+            to_currency="USD",
+            from_currencies=["EUR", "GMT", "eur"],
+        )
+        assert skipped == ["GMT"]
+        assert [r.from_currency for r in rates] == ["EUR"]
+        assert calls == [("EUR", "USD")]

@@ -12,6 +12,7 @@ src/serendipity_spend.egg-info/top_level.txt
 src/serendipity_spend/api/deps.py
 src/serendipity_spend/api/router.py
 src/serendipity_spend/core/config.py
+src/serendipity_spend/core/currencies.py
 src/serendipity_spend/core/db.py
 src/serendipity_spend/core/models.py
 src/serendipity_spend/core/security.py
@@ -34,6 +35,7 @@ src/serendipity_spend/modules/exports/models.py
 src/serendipity_spend/modules/exports/schemas.py
 src/serendipity_spend/modules/exports/service.py
 src/serendipity_spend/modules/extraction/ai.py
+src/serendipity_spend/modules/extraction/models.py
 src/serendipity_spend/modules/extraction/service.py
 src/serendipity_spend/modules/extraction/parsers/__init__.py
 src/serendipity_spend/modules/extraction/parsers/baggage_fee.py
@@ -67,8 +69,10 @@ tests/test_eml_body_ingestion.py
 tests/test_expense_cross_claim_uniqueness.py
 tests/test_exports_merged_pdf_and_xlsx_format.py
 tests/test_extraction_ocr_fallback.py
+tests/test_file_type_detection.py
 tests/test_fx_auto_fetch.py
 tests/test_google_oauth_domain_restriction.py
 tests/test_policy_additional_rules.py
 tests/test_policy_exception_workflow.py
+tests/test_receipt_ai_cache.py
 tests/test_ui_policy_summary.py

@@ -68,6 +68,7 @@ Automates the intake-to-approval workflow.
 - Uber trip summary may be insufficient (`R010`, NEEDS_INFO)
 - Grab receipt indicates PERSONAL profile (`R020`, WARN)
 - Missing FX rate to home currency (`R030`, NEEDS_INFO)
+- Invalid currency code (`R031`, NEEDS_INFO)
 - Generic “total” extraction requires employee review (`R040`, NEEDS_INFO)
 - Hotel nightly cap (USD 300/night) using `hotel_nights` (`R101`–`R103`)
 - Meals over USD 100 require attendees (`R111`–`R112`)

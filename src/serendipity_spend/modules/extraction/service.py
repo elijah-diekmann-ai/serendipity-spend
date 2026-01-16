@@ -5,13 +5,15 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 
 from pypdf import PdfReader
 from sqlalchemy import select
 
+from serendipity_spend.core.config import settings
+from serendipity_spend.core.currencies import normalize_currency
 from serendipity_spend.core.db import SessionLocal
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
@@ -21,7 +23,12 @@ from serendipity_spend.modules.documents.models import (
     SourceFileStatus,
 )
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
-from serendipity_spend.modules.extraction.ai import extract_policy_fields
+from serendipity_spend.modules.extraction.ai import (
+    extract_policy_fields,
+    extract_receipt_fields,
+    receipt_ai_available,
+)
+from serendipity_spend.modules.extraction.models import ExtractionAICache
 from serendipity_spend.modules.extraction.parsers.baggage_fee import (
     parse_baggage_fee_payment_receipt,
 )
@@ -59,13 +66,38 @@ def extract_source_file(*, source_file_id: str) -> None:
 
         try:
             body = get_storage().get(key=source.storage_key)
-            if source.filename.lower().endswith(".pdf") or (source.content_type or "").endswith(
-                "/pdf"
-            ):
+            kind = _detect_file_kind(
+                filename=source.filename,
+                content_type=source.content_type,
+                body=body,
+            )
+            if kind == "bad_pdf_upload":
+                _sync_extraction_task(
+                    session=session,
+                    claim=claim,
+                    source=source,
+                    status=TaskStatus.OPEN,
+                    title=f"Bad upload: {source.filename}",
+                    description=(
+                        "This file looks like a PDF but does not start with the %PDF header. "
+                        "Re-upload a valid PDF, or upload the original email/HTML/text file "
+                        "with the correct extension."
+                    ),
+                )
+                source.status = SourceFileStatus.FAILED
+                source.error_message = "Bad upload: expected PDF header (%PDF)"
+                session.add(source)
+                if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                    claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
+                    session.add(claim)
+                session.commit()
+                return
+
+            if kind == "pdf":
                 _process_pdf_bundle(session=session, claim=claim, source=source, body=body)
-            elif _is_supported_image(source.filename, source.content_type):
+            elif kind == "image":
                 _process_image(session=session, claim=claim, source=source, body=body)
-            elif _is_supported_text(source.filename, source.content_type):
+            elif kind == "text":
                 _process_text(session=session, claim=claim, source=source, body=body)
             else:
                 raise ValueError("Unsupported file type (v1 supports PDF, images, and text)")
@@ -131,6 +163,13 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
         session.flush()
 
         parsed = _parse_segment(seg=seg, pages=pages)
+        if not parsed:
+            parsed = _parse_receipt_with_ai(
+                session=session,
+                text=seg_text,
+                text_hash=text_hash,
+                extraction_method="ai_fallback",
+            )
         if not parsed:
             parsed = _parse_generic_receipt(seg_text, extraction_method="generic_fallback")
         if not parsed:
@@ -205,6 +244,13 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
     text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
     parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
+        parsed = _parse_receipt_with_ai(
+            session=session,
+            text=text,
+            text_hash=text_hash,
+            extraction_method="ai_image",
+        )
     if not parsed:
         parsed = _parse_generic_receipt(text)
     if parsed:
@@ -275,7 +321,16 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         return
 
     vendor, receipt_type, confidence = _classify_text(text)
+    text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
     parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
+        parsed = _parse_receipt_with_ai(
+            session=session,
+            text=text,
+            text_hash=text_hash,
+            extraction_method="ai_text",
+        )
     if not parsed:
         parsed = _parse_generic_receipt(text, extraction_method="generic")
 
@@ -284,7 +339,6 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         receipt_type = parsed.receipt_type
         confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
 
-    text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
     evidence = EvidenceDocument(
         source_file_id=source.id,
         page_start=None,
@@ -336,9 +390,94 @@ def _decode_text_bytes(*, body: bytes, filename: str, content_type: str | None) 
         text = body.decode("utf-8", errors="replace")
     except Exception:
         text = body.decode("latin-1", errors="replace")
-    if is_html:
+    if is_html or _looks_like_html(text):
         text = _html_to_text(text)
     return text
+
+
+def _looks_like_html(text: str) -> bool:
+    t = (text or "").lstrip().lower()
+    if not t:
+        return False
+    if t.startswith("<!doctype html") or t.startswith("<html"):
+        return True
+    head = t[:2000]
+    return bool(re.search(r"<(html|body|div|p|br|table|tr|td|span)(\s|>)", head, re.I))
+
+
+def _detect_file_kind(*, filename: str, content_type: str | None, body: bytes) -> str:
+    if _looks_like_pdf_bytes(body):
+        return "pdf"
+    if _looks_like_image_bytes(body):
+        return "image"
+    if _looks_like_text_bytes(body):
+        return "text"
+
+    # Fallback to filename/content-type hints.
+    if _is_supported_image(filename, content_type):
+        return "image"
+    if _is_supported_text(filename, content_type):
+        return "text"
+
+    # Layer 0 PDF guardrail: never attempt PdfReader if bytes are not a PDF.
+    if filename.lower().endswith(".pdf") or (content_type or "").lower().endswith("/pdf"):
+        return "bad_pdf_upload"
+
+    return "unknown"
+
+
+def _looks_like_pdf_bytes(body: bytes) -> bool:
+    if not body:
+        return False
+    b = body.lstrip()
+    if b.startswith(b"\xef\xbb\xbf"):
+        b = b[3:].lstrip()
+    return b.startswith(b"%PDF")
+
+
+def _looks_like_image_bytes(body: bytes) -> bool:
+    if not body:
+        return False
+    b = body.lstrip()
+    return (
+        b.startswith(b"\x89PNG\r\n\x1a\n")
+        or b.startswith(b"\xff\xd8\xff")
+        or b.startswith(b"II*\x00")
+        or b.startswith(b"MM\x00*")
+        or b.startswith(b"BM")
+    )
+
+
+def _looks_like_text_bytes(body: bytes) -> bool:
+    if not body:
+        return False
+    sample = body[:4096]
+    if b"\x00" in sample:
+        return False
+    stripped = sample.lstrip()
+    if stripped.startswith(b"\xef\xbb\xbf"):
+        stripped = stripped[3:]
+    lower = stripped.lower()
+    if b"<!doctype html" in lower or b"<html" in lower or b"<body" in lower:
+        return True
+    if b"subject:" in lower and b"from:" in lower:
+        return True
+    try:
+        stripped.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+
+    nontext = 0
+    for ch in stripped:
+        if ch in {9, 10, 13}:
+            continue
+        if 32 <= ch <= 126:
+            continue
+        # valid UTF-8 non-ASCII bytes will pass the strict decode above
+        if 128 <= ch <= 255:
+            continue
+        nontext += 1
+    return (nontext / max(1, len(stripped))) <= 0.02
 
 
 def _html_to_text(html: str) -> str:
@@ -699,7 +838,17 @@ def _process_page_ranges(
         if start == end:
             page_text = pages[start]
             vendor, receipt_type, confidence = _classify_text(page_text)
+            page_text_hash = hashlib.sha256(
+                page_text.encode("utf-8", errors="ignore")
+            ).hexdigest()
             parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
+            if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
+                parsed = _parse_receipt_with_ai(
+                    session=session,
+                    text=page_text,
+                    text_hash=page_text_hash,
+                    extraction_method="ai_page",
+                )
             if not parsed:
                 parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
 
@@ -739,7 +888,17 @@ def _process_page_ranges(
         for idx in range(start, end + 1):
             page_text = pages[idx]
             vendor, receipt_type, confidence = _classify_text(page_text)
+            page_text_hash = hashlib.sha256(
+                page_text.encode("utf-8", errors="ignore")
+            ).hexdigest()
             parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
+            if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
+                parsed = _parse_receipt_with_ai(
+                    session=session,
+                    text=page_text,
+                    text_hash=page_text_hash,
+                    extraction_method="ai_page",
+                )
             if not parsed:
                 parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
             if not parsed:
@@ -793,7 +952,17 @@ def _process_page_ranges(
 
         combined_text = "\n\n".join(pages[start : end + 1])
         vendor, receipt_type, confidence = _classify_text(combined_text)
+        combined_text_hash = hashlib.sha256(
+            combined_text.encode("utf-8", errors="ignore")
+        ).hexdigest()
         parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=combined_text)
+        if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
+            parsed = _parse_receipt_with_ai(
+                session=session,
+                text=combined_text,
+                text_hash=combined_text_hash,
+                extraction_method="ai_multi_page",
+            )
         if not parsed:
             parsed = _parse_generic_receipt(combined_text, extraction_method="generic_multi_page")
 
@@ -876,6 +1045,168 @@ def _process_page_ranges(
             unhandled_page_idxs.append(idx)
 
     return parsed_items, unhandled_page_idxs
+
+
+def _should_try_receipt_ai(*, vendor: str, confidence: float) -> bool:
+    if vendor == "Unknown":
+        return True
+    try:
+        return float(confidence) < 0.7
+    except Exception:
+        return True
+
+
+def _get_cached_receipt_ai(session, *, text_hash: str) -> dict | None:
+    cached = session.scalar(
+        select(ExtractionAICache).where(ExtractionAICache.text_hash == text_hash)
+    )
+    if not cached:
+        return None
+    if cached.schema_version != 1:
+        return None
+    if not isinstance(cached.response_json, dict):
+        return None
+    return cached.response_json
+
+
+def _upsert_receipt_ai_cache(session, *, text_hash: str, response_json: dict) -> None:
+    cached = session.scalar(
+        select(ExtractionAICache).where(ExtractionAICache.text_hash == text_hash)
+    )
+    if not cached:
+        cached = ExtractionAICache(
+            text_hash=text_hash,
+            provider="openai",
+            model=str(settings.openai_model or ""),
+            schema_version=1,
+            response_json=response_json,
+        )
+        session.add(cached)
+        session.flush()
+        return
+    cached.provider = "openai"
+    cached.model = str(settings.openai_model or "")
+    cached.schema_version = 1
+    cached.response_json = response_json
+    session.add(cached)
+    session.flush()
+
+
+def _parse_receipt_with_ai(
+    *,
+    session,
+    text: str,
+    text_hash: str,
+    extraction_method: str,
+):
+    if not receipt_ai_available():
+        return None
+    ai = _get_cached_receipt_ai(session, text_hash=text_hash)
+    if ai is None:
+        ai = extract_receipt_fields(text)
+        if ai and isinstance(ai, dict):
+            _upsert_receipt_ai_cache(session, text_hash=text_hash, response_json=ai)
+
+    if not ai:
+        return None
+
+    total = ai.get("total") if isinstance(ai, dict) else None
+    if not isinstance(total, dict):
+        return None
+
+    cur = total.get("currency")
+    amt = total.get("amount")
+    evidence_lines = total.get("evidence_lines")
+    if not isinstance(evidence_lines, list) or not evidence_lines:
+        return None
+
+    if not isinstance(cur, str) or not isinstance(amt, str):
+        return None
+    cur_norm = normalize_currency(cur)
+    if not cur_norm:
+        return None
+    try:
+        amount = Decimal(str(amt).strip().replace(",", "")).quantize(Decimal("0.01"))
+    except Exception:
+        return None
+
+    evidence_snippet = _snippet_from_line_refs(text, evidence_lines=evidence_lines)
+    corroborated = _extract_total_amount(evidence_snippet)
+    if not corroborated or corroborated[0] != cur_norm or corroborated[1] != amount:
+        return None
+
+    tx_date = None
+    tx_date_from_ai = False
+    dt = ai.get("transaction_date")
+    if isinstance(dt, dict) and isinstance(dt.get("value"), str):
+        raw_date = dt["value"]
+        try:
+            candidate = date.fromisoformat(raw_date)
+        except Exception:
+            candidate = None
+        ev = dt.get("evidence_lines")
+        if candidate and isinstance(ev, list) and ev:
+            snippet = _snippet_from_line_refs(text, evidence_lines=ev)
+            corroborated_date = _extract_any_date(snippet)
+            if corroborated_date == candidate:
+                tx_date = candidate
+                tx_date_from_ai = True
+
+    vendor = None
+    vendor_from_ai = False
+    v = ai.get("vendor")
+    if isinstance(v, dict) and isinstance(v.get("value"), str):
+        vv = v["value"].strip()[:100] or None
+        ev = v.get("evidence_lines")
+        if vv and isinstance(ev, list) and ev:
+            snippet = _snippet_from_line_refs(text, evidence_lines=ev)
+            if vv.lower() in snippet.lower():
+                vendor = vv
+                vendor_from_ai = True
+    vendor = vendor or _extract_vendor_name(text) or "Unknown"
+
+    category = None
+    cat = ai.get("category")
+    if isinstance(cat, dict) and isinstance(cat.get("value"), str):
+        category = cat["value"].strip().lower() or None
+    category = category or _guess_category(text)
+
+    confidence = 0.0
+    try:
+        confidence = float(total.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    metadata: dict = {
+        "extraction_family": "generic",
+        "extraction_method": extraction_method,
+        "extraction_confidence": max(0.3, confidence),
+        "employee_reviewed": False,
+        "ai_receipt_fields": ai,
+        "ai_receipt_fields_validated": {
+            "total": True,
+            "vendor": vendor_from_ai,
+            "transaction_date": tx_date_from_ai,
+        },
+    }
+
+    inferred_category, policy_metadata = _infer_policy_fields(text=text, category_hint=category)
+    if not category and inferred_category:
+        category = inferred_category
+    metadata.update(policy_metadata)
+
+    return _GenericParsedExpense(
+        vendor=vendor,
+        vendor_reference=None,
+        receipt_type="generic_receipt",
+        category=category,
+        description=f"Receipt: {vendor}" if vendor else "Receipt",
+        transaction_date=tx_date,
+        amount=amount,
+        currency=cur_norm,
+        metadata=metadata,
+    )
 
 
 def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
@@ -1012,31 +1343,81 @@ def _infer_policy_fields(*, text: str, category_hint: str | None) -> tuple[str |
     # Optional AI enrichment (fills missing policy fields + category)
     ai = extract_policy_fields(text)
     if ai:
+        provenance = ai.get("_provenance") if isinstance(ai.get("_provenance"), dict) else {}
+
+        def corroborated_snippet(field: str) -> str | None:
+            prov = provenance.get(field)
+            if not isinstance(prov, dict):
+                return None
+            lines = prov.get("evidence_lines")
+            if not isinstance(lines, list) or not lines:
+                return None
+            return _snippet_from_line_refs(text, evidence_lines=lines)
+
         ai_cat = ai.get("category")
         if isinstance(ai_cat, str) and not inferred_category:
-            inferred_category = ai_cat
+            snippet = corroborated_snippet("category") if provenance else None
+            if snippet and _guess_category(snippet) == ai_cat:
+                inferred_category = ai_cat
+            elif not provenance:
+                inferred_category = ai_cat
 
         if inferred_category == "lodging" and not metadata.get("hotel_nights"):
             nights = ai.get("hotel_nights")
             if isinstance(nights, int) and 1 <= nights <= 60:
-                metadata["hotel_nights"] = nights
+                snippet = corroborated_snippet("hotel_nights") if provenance else None
+                if snippet:
+                    det = _extract_hotel_nights(snippet)
+                    if det == nights:
+                        metadata["hotel_nights"] = nights
+                    else:
+                        ci, co = _extract_hotel_stay_dates(snippet)
+                        if ci and co and co > ci and (co - ci).days == nights:
+                            metadata["hotel_nights"] = nights
+                elif not provenance:
+                    metadata["hotel_nights"] = nights
 
         if inferred_category == "airfare":
             if metadata.get("flight_duration_hours") is None:
                 duration = ai.get("flight_duration_hours")
                 if isinstance(duration, (int, float)) and 0.1 <= float(duration) <= 30:
-                    metadata["flight_duration_hours"] = round(float(duration), 2)
+                    snippet = corroborated_snippet("flight_duration_hours") if provenance else None
+                    if snippet:
+                        det = _extract_flight_duration_hours(snippet)
+                        if det is not None and abs(float(det) - float(duration)) <= 0.05:
+                            metadata["flight_duration_hours"] = round(float(duration), 2)
+                    elif not provenance:
+                        metadata["flight_duration_hours"] = round(float(duration), 2)
             if not metadata.get("flight_cabin_class"):
                 cabin = ai.get("flight_cabin_class")
                 if isinstance(cabin, str) and cabin.strip():
-                    metadata["flight_cabin_class"] = cabin.strip().lower()
+                    cabin_norm = cabin.strip().lower()
+                    snippet = corroborated_snippet("flight_cabin_class") if provenance else None
+                    if snippet:
+                        det = _extract_flight_cabin_class(snippet)
+                        if det and det == cabin_norm:
+                            metadata["flight_cabin_class"] = cabin_norm
+                    elif not provenance:
+                        metadata["flight_cabin_class"] = cabin_norm
 
         if inferred_category == "meals" and metadata.get("attendees") in {None, ""}:
             attendees = ai.get("attendees")
             if isinstance(attendees, int) and 1 <= attendees <= 50:
-                metadata["attendees"] = attendees
+                snippet = corroborated_snippet("attendees") if provenance else None
+                if snippet:
+                    det = _extract_meal_attendees(snippet)
+                    if det == attendees:
+                        metadata["attendees"] = attendees
+                elif not provenance:
+                    metadata["attendees"] = attendees
             elif isinstance(attendees, str) and attendees.strip():
-                metadata["attendees"] = attendees.strip()[:200]
+                att = attendees.strip()[:200]
+                snippet = corroborated_snippet("attendees") if provenance else None
+                if snippet:
+                    if att.lower() in snippet.lower():
+                        metadata["attendees"] = att
+                elif not provenance:
+                    metadata["attendees"] = att
 
         if "confidence" in ai:
             metadata["policy_fields_confidence"] = ai.get("confidence")
@@ -1111,24 +1492,28 @@ def _parse_date_any(s: str | None) -> date | None:
     raw = str(s).strip()
     # ISO
     try:
-        return datetime.strptime(raw, "%Y-%m-%d").date()
+        d = datetime.strptime(raw, "%Y-%m-%d").date()
+        return d if _is_plausible_receipt_date(d) else None
     except ValueError:
         pass
     # 05 Sep 2025 / 05 September 2025
     for fmt in ("%d %b %Y", "%d %B %Y"):
         try:
-            return datetime.strptime(raw, fmt).date()
+            d = datetime.strptime(raw, fmt).date()
+            return d if _is_plausible_receipt_date(d) else None
         except ValueError:
             continue
     # Sep 05, 2025 / September 5, 2025
     for fmt in ("%b %d, %Y", "%B %d, %Y"):
         try:
-            return datetime.strptime(raw, fmt).date()
+            d = datetime.strptime(raw, fmt).date()
+            return d if _is_plausible_receipt_date(d) else None
         except ValueError:
             continue
     # 31AUG25
     try:
-        return datetime.strptime(raw.title(), "%d%b%y").date()
+        d = datetime.strptime(raw.title(), "%d%b%y").date()
+        return d if _is_plausible_receipt_date(d) else None
     except ValueError:
         pass
     # 12/31/2025 or 31/12/2025 (prefer unambiguous)
@@ -1142,7 +1527,8 @@ def _parse_date_any(s: str | None) -> date | None:
             if not ok:
                 continue
             try:
-                return datetime.strptime(raw, fmt).date()
+                d = datetime.strptime(raw, fmt).date()
+                return d if _is_plausible_receipt_date(d) else None
             except ValueError:
                 continue
     return None
@@ -1288,8 +1674,11 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
             ln,
         ):
             cur, amt = m.groups()
+            cur_norm = normalize_currency(cur)
+            if not cur_norm:
+                continue
             try:
-                candidates.append((cur.upper(), Decimal(amt.replace(",", ""))))
+                candidates.append((cur_norm, Decimal(amt.replace(",", ""))))
             except Exception:
                 continue
 
@@ -1299,8 +1688,11 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
         ):
             sym, amt = m.groups()
             cur = {"$": "USD", "US$": "USD", "CA$": "CAD", "£": "GBP", "€": "EUR"}.get(sym, "USD")
+            cur_norm = normalize_currency(cur)
+            if not cur_norm:
+                continue
             try:
-                candidates.append((cur, Decimal(amt.replace(",", ""))))
+                candidates.append((cur_norm, Decimal(amt.replace(",", ""))))
             except Exception:
                 continue
 
@@ -1310,8 +1702,11 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
             ln,
         ):
             amt, cur = m.groups()
+            cur_norm = normalize_currency(cur)
+            if not cur_norm:
+                continue
             try:
-                candidates.append((cur.upper(), Decimal(amt.replace(",", ""))))
+                candidates.append((cur_norm, Decimal(amt.replace(",", ""))))
             except Exception:
                 continue
 
@@ -1333,12 +1728,40 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
     return max(candidates, key=lambda x: x[1])
 
 
+def _snippet_from_line_refs(text: str, *, evidence_lines: list[object]) -> str:
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    nums: set[int] = set()
+    for raw in evidence_lines[:30]:
+        try:
+            n = int(raw)
+        except Exception:
+            continue
+        for nn in (n, n + 1):
+            if 1 <= nn <= len(lines):
+                nums.add(nn)
+    snippet_lines = [lines[n - 1].strip() for n in sorted(nums) if lines[n - 1].strip()]
+    return "\n".join(snippet_lines)
+
+
+def _is_plausible_receipt_date(d: date) -> bool:
+    today = date.today()
+    if d < (today - timedelta(days=365 * 15)):
+        return False
+    if d > (today + timedelta(days=365 * 2)):
+        return False
+    return True
+
+
 def _extract_any_date(text: str):
     # ISO date: 2025-09-05
     m = re.search(r"\b([0-9]{4}-[0-9]{2}-[0-9]{2})\b", text)
     if m:
         try:
-            return datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            if _is_plausible_receipt_date(d):
+                return d
         except ValueError:
             pass
 
@@ -1348,7 +1771,9 @@ def _extract_any_date(text: str):
         s = m.group(1)
         for fmt in ("%d %b %Y", "%d %B %Y"):
             try:
-                return datetime.strptime(s, fmt).date()
+                d = datetime.strptime(s, fmt).date()
+                if _is_plausible_receipt_date(d):
+                    return d
             except ValueError:
                 continue
 
@@ -1358,7 +1783,9 @@ def _extract_any_date(text: str):
         s = m.group(1)
         for fmt in ("%b %d, %Y", "%B %d, %Y"):
             try:
-                return datetime.strptime(s, fmt).date()
+                d = datetime.strptime(s, fmt).date()
+                if _is_plausible_receipt_date(d):
+                    return d
             except ValueError:
                 continue
 
@@ -1366,7 +1793,9 @@ def _extract_any_date(text: str):
     m = re.search(r"\b([0-9]{2}[A-Za-z]{3}[0-9]{2})\b", text)
     if m:
         try:
-            return datetime.strptime(m.group(1).title(), "%d%b%y").date()
+            d = datetime.strptime(m.group(1).title(), "%d%b%y").date()
+            if _is_plausible_receipt_date(d):
+                return d
         except ValueError:
             pass
 
@@ -1385,7 +1814,9 @@ def _extract_any_date(text: str):
             if not ok:
                 continue
             try:
-                return datetime.strptime(s, f).date()
+                d = datetime.strptime(s, f).date()
+                if _is_plausible_receipt_date(d):
+                    return d
             except ValueError:
                 continue
 
