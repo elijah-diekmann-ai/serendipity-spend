@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="page-header">
+    <div class="page-header-content">
+      <div>
+        <h1 class="page-title">New claim</h1>
+        <p class="text-secondary mt-1">Create a claim, then upload receipts and review policy flags.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <form method="post" action="/app/claims/new">
+        <div class="form-group">
+          <label>Home currency</label>
+          <select name="home_currency">
+            {% for cur in currency_options %}
+              <option value="{{ cur }}" {% if cur == default_home_currency %}selected{% endif %}>{{ cur }}</option>
+            {% endfor %}
+          </select>
+          <div class="muted mt-1">Reimbursements convert to this currency.</div>
+        </div>
+        <button class="btn btn-primary" type="submit">Create claim</button>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+

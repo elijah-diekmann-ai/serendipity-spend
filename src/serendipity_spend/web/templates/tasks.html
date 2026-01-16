@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="page-header">
+    <div class="page-header-content">
+      <div>
+        <h1 class="page-title">My tasks</h1>
+        <p class="text-secondary mt-1">Outstanding items to complete before submitting claims.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card dashboard-card dashboard-card--blue">
+    <div class="card-body">
+      {% if tasks|length == 0 %}
+        <div class="empty-state">
+          <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+          </svg>
+          <p>No open tasks.</p>
+        </div>
+      {% else %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Task</th>
+              <th>Claim</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in tasks %}
+              <tr>
+                <td><span class="pill warn">OPEN</span></td>
+                <td>
+                  {{ t.title }}
+                  {% if t.description %}
+                    <div class="muted mt-1">{{ t.description }}</div>
+                  {% endif %}
+                </td>
+                <td class="mono muted">
+                  <a href="/app/claims/{{ t.claim_id }}">#{{ t.claim_id|string|truncate(8, True, '') }}</a>
+                </td>
+                <td class="text-right">
+                  <form method="post" action="/app/tasks/{{ t.id }}/resolve">
+                    <input type="hidden" name="claim_id" value="{{ t.claim_id }}" />
+                    <button class="btn btn-sm" type="submit">Mark done</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
+

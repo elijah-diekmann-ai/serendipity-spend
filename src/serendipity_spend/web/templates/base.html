@@ -17,8 +17,9 @@
           </a>
         </div>
         <nav class="sidebar-nav">
+          {% set path = request.url.path %}
           <div class="nav-section-label">Menu</div>
-          <a class="nav-link active" href="/app">
+          <a class="nav-link {% if path == '/app' or (path.startswith('/app/claims/') and path != '/app/claims/new') %}active{% endif %}" href="/app">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="7" height="9"></rect>
               <rect x="14" y="3" width="7" height="5"></rect>
@@ -27,6 +28,31 @@
             </svg>
             <span>Claims</span>
           </a>
+          <a class="nav-link {% if path == '/app/claims/new' %}active{% endif %}" href="/app/claims/new">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14"></path>
+              <path d="M5 12h14"></path>
+            </svg>
+            <span>New claim</span>
+          </a>
+          <a class="nav-link {% if path.startswith('/app/tasks') %}active{% endif %}" href="/app/tasks">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 11l3 3L22 4"></path>
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+            </svg>
+            <span>My tasks</span>
+          </a>
+          {% if user.role.value in ['APPROVER','ADMIN'] %}
+            <div class="nav-section-label" style="margin-top: 10px;">Review</div>
+            <a class="nav-link {% if path.startswith('/app/inbox') %}active{% endif %}" href="/app/inbox">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 12h-6l-2 3h-4l-2-3H2"></path>
+                <path d="M5 12V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v7"></path>
+                <path d="M2 12l2 9h16l2-9"></path>
+              </svg>
+              <span>Approvals inbox</span>
+            </a>
+          {% endif %}
         </nav>
         <div class="sidebar-footer">
           <div class="user-info">
