@@ -89,6 +89,7 @@ def _build_reimbursement_xlsx(
 ) -> bytes:
     wb = _load_reimbursement_template()
     ws = wb.active
+    ws.title = "Reimbursement"
     employee_label = (
         (employee.full_name if employee and employee.full_name else None)
         or (employee.email if employee else None)

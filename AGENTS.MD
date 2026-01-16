@@ -133,7 +133,7 @@ domain_model:
     ExportRun:
       table: exports_export_run
       model: src/serendipity_spend/modules/exports/models.py
-      key_fields: [id, claim_id, requested_by_user_id, status, summary_xlsx_key, supporting_zip_key]
+      key_fields: [id, claim_id, requested_by_user_id, status, summary_xlsx_key, supporting_pdf_key, supporting_zip_key]
     AuditEvent:
       table: audit_event
       model: src/serendipity_spend/modules/audit/models.py
@@ -365,7 +365,7 @@ storage_contract:
   key_scheme:
     source_upload: "claims/{claim_id}/source/{uuid4}-{original_filename}"
     export_summary_xlsx: "claims/{claim_id}/exports/{export_run_id}/summary.xlsx"
-    export_supporting_zip: "claims/{claim_id}/exports/{export_run_id}/supporting.zip"
+    export_supporting_pdf: "claims/{claim_id}/exports/{export_run_id}/supporting.pdf"
 
 extraction_contract:
   supported_inputs_v1:
@@ -433,8 +433,8 @@ export_contract:
       data_start_row: 8
       currencies_supported_in_columns: [USD, SGD, CAD, GBP]
       reimbursement_column_currency: claim.home_currency
-    supporting_docs_zip:
-      contents: original SourceFile bytes, stored under original filenames
+    supporting_docs_pdf:
+      contents: merged PDF of all SourceFile uploads (PDFs + images converted to PDF pages), ordered by earliest linked ExpenseItem.transaction_date (fallback: upload time)
 
 operations:
   env_vars:
@@ -469,4 +469,3 @@ testing:
       file: Data/DC__OOP__05 Sep 2025.pdf
       items_total: 17
       by_vendor: {Grab: 4, "United Airlines": 3, Uber: 9, Airline: 1}
-
