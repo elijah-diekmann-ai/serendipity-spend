@@ -58,9 +58,11 @@ class S3ObjectStorage(ObjectStorage):
         session = boto3.session.Session(
             aws_access_key_id=settings.s3_access_key_id,
             aws_secret_access_key=settings.s3_secret_access_key,
-            region_name=settings.s3_region,
+            region_name=settings.s3_region or None,
         )
-        self._client = session.client("s3", endpoint_url=settings.s3_endpoint_url)
+        # Treat empty string as None (use default AWS endpoint)
+        endpoint_url = settings.s3_endpoint_url or None
+        self._client = session.client("s3", endpoint_url=endpoint_url)
         self._bucket = settings.s3_bucket
         self._ensure_bucket()
 
