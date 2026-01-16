@@ -85,8 +85,20 @@ def download_supporting(
     user: User = Depends(get_current_user),
 ) -> Response:
     run = session.scalar(select(ExportRun).where(ExportRun.id == export_run_id))
-    if not run or not run.supporting_zip_key:
+    if not run or (not run.supporting_pdf_key and not run.supporting_zip_key):
         return Response(status_code=404)
     _ = get_claim_for_user(session, claim_id=run.claim_id, user=user)
+    if run.supporting_pdf_key:
+        body = get_storage().get(key=run.supporting_pdf_key)
+        return Response(
+            content=body,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="Supporting_Documents.pdf"'},
+        )
+
     body = get_storage().get(key=run.supporting_zip_key)
-    return Response(content=body, media_type="application/zip")
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="Supporting_Documents.zip"'},
+    )

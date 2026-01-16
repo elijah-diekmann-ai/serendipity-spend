@@ -39,7 +39,12 @@ from serendipity_spend.modules.expenses.service import (
 )
 from serendipity_spend.modules.exports.models import ExportRun
 from serendipity_spend.modules.exports.service import create_export_run
-from serendipity_spend.modules.fx.service import apply_fx_to_claim_items, upsert_fx_rate
+from serendipity_spend.modules.fx.models import FxRate
+from serendipity_spend.modules.fx.service import (
+    apply_fx_to_claim_items,
+    auto_upsert_fx_rates,
+    upsert_fx_rate,
+)
 from serendipity_spend.modules.identity.google_oauth import (
     build_google_authorize_url,
     exchange_google_code,
@@ -369,6 +374,17 @@ def claim_detail(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     docs = list_source_files(session, claim=claim, user=user)
     items = list_items(session, claim_id=claim.id)
+
+    fx_values = {
+        fx.from_currency: str(fx.rate)
+        for fx in session.scalars(
+            select(FxRate).where(
+                FxRate.claim_id == claim.id,
+                FxRate.to_currency == claim.home_currency,
+            )
+        )
+    }
+
     edit_item = None
     edit_item_id = request.query_params.get("edit_item_id")
     if edit_item_id:
@@ -402,6 +418,7 @@ def claim_detail(
             "tasks": tasks,
             "violations": violations,
             "exports": exports,
+            "fx_values": fx_values,
             "expense_categories": [
                 "transport",
                 "lodging",
@@ -746,6 +763,43 @@ def set_fx_ui(
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
+@router.post("/app/claims/{claim_id}/fx/auto", response_class=RedirectResponse)
+def auto_fx_ui(
+    claim_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+
+    from serendipity_spend.modules.expenses.models import ExpenseItem
+
+    currencies = {
+        str(c).upper()
+        for c in session.scalars(
+            select(ExpenseItem.amount_original_currency).where(ExpenseItem.claim_id == claim.id)
+        )
+        if c
+    }
+    currencies.update({"USD", "CAD", "GBP", "EUR"})
+    currencies.discard(claim.home_currency.upper())
+
+    try:
+        auto_upsert_fx_rates(
+            session,
+            claim_id=claim.id,
+            to_currency=claim.home_currency,
+            from_currencies=currencies,
+        )
+        evaluate_claim(session, claim_id=claim.id)
+        return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+    except Exception:  # noqa: BLE001
+        # Fall back to manual entry if the external FX service is unavailable.
+        return RedirectResponse(url=f"/app/claims/{claim.id}?fx_error=1", status_code=303)
+
+
 @router.post("/app/claims/{claim_id}/export", response_class=RedirectResponse)
 def create_export_ui(
     claim_id: uuid.UUID,
@@ -790,11 +844,23 @@ def ui_download_export_supporting(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
     run = session.scalar(select(ExportRun).where(ExportRun.id == export_run_id))
-    if not run or not run.supporting_zip_key:
+    if not run or (not run.supporting_pdf_key and not run.supporting_zip_key):
         return Response(status_code=404)
     _ = get_claim_for_user(session, claim_id=run.claim_id, user=user)
+    if run.supporting_pdf_key:
+        body = get_storage().get(key=run.supporting_pdf_key)
+        return Response(
+            content=body,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="Supporting_Documents.pdf"'},
+        )
+
     body = get_storage().get(key=run.supporting_zip_key)
-    return Response(content=body, media_type="application/zip")
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="Supporting_Documents.zip"'},
+    )
 
 
 @router.post("/app/claims/{claim_id}/approve", response_class=RedirectResponse)

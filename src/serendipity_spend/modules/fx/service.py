@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
+from datetime import date
 from decimal import Decimal
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -67,3 +70,62 @@ def apply_fx_to_claim_items(session: Session, *, claim_id: uuid.UUID) -> None:
         session.add(item)
 
     session.commit()
+
+
+def auto_upsert_fx_rates(
+    session: Session,
+    *,
+    claim_id: uuid.UUID,
+    to_currency: str,
+    from_currencies: Iterable[str],
+) -> list[FxRate]:
+    to_currency = to_currency.strip().upper()
+    if not to_currency or len(to_currency) != 3:
+        raise ValueError("Invalid to_currency")
+
+    out: list[FxRate] = []
+    for raw in sorted({c.strip().upper() for c in from_currencies if c}):
+        if raw == to_currency:
+            continue
+        rate, as_of_date = _fetch_frankfurter_rate(from_currency=raw, to_currency=to_currency)
+        fx = upsert_fx_rate(
+            session,
+            claim_id=claim_id,
+            from_currency=raw,
+            to_currency=to_currency,
+            rate=rate,
+            as_of_date=as_of_date,
+            source="frankfurter.app",
+        )
+        out.append(fx)
+
+    apply_fx_to_claim_items(session, claim_id=claim_id)
+    return out
+
+
+def _fetch_frankfurter_rate(*, from_currency: str, to_currency: str) -> tuple[Decimal, date]:
+    from_currency = from_currency.strip().upper()
+    to_currency = to_currency.strip().upper()
+    if not from_currency or len(from_currency) != 3:
+        raise ValueError("Invalid from_currency")
+    if not to_currency or len(to_currency) != 3:
+        raise ValueError("Invalid to_currency")
+    if from_currency == to_currency:
+        return Decimal("1"), date.today()
+
+    url = "https://api.frankfurter.app/latest"
+    resp = httpx.get(
+        url,
+        params={"from": from_currency, "to": to_currency},
+        timeout=10,
+        follow_redirects=True,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    raw_rate = (data.get("rates") or {}).get(to_currency)
+    raw_date = data.get("date")
+    if raw_rate is None or not raw_date:
+        raise ValueError("Unexpected FX response shape")
+
+    return Decimal(str(raw_rate)), date.fromisoformat(str(raw_date))

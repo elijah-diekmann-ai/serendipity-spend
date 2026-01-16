@@ -1,19 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
-  <!-- Breadcrumb -->
-  <div class="breadcrumb">
-    <a href="/app" class="breadcrumb-link">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="15 18 9 12 15 6"></polyline>
-      </svg>
-      Back to Claims
-    </a>
-  </div>
-
   <!-- Header -->
   <div class="claim-header">
-    <div class="claim-header-main">
-      <h1 class="page-title">Claim #{{ claim.id|string|truncate(8, True, '') }}</h1>
+    <div>
+      <a href="/app" class="breadcrumb-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+        Claims
+      </a>
+      <h1 class="page-title mt-1">
+        {% if claim.purpose %}{{ claim.purpose|truncate(40) }}{% else %}Untitled claim{% endif %}
+      </h1>
       <div class="claim-meta">
         {% if claim.status.value == 'DRAFT' %}
           <span class="pill">Draft</span>
@@ -26,714 +24,379 @@
         {% else %}
           <span class="pill info">{{ claim.status.value }}</span>
         {% endif %}
-        <span class="text-secondary">{{ claim.home_currency }}</span>
         {% if claim.travel_start_date and claim.travel_end_date %}
           <span class="muted">{{ claim.travel_start_date }} → {{ claim.travel_end_date }}</span>
         {% endif %}
+        <span class="muted">{{ claim.home_currency }}</span>
       </div>
     </div>
-    <div class="btn-row">
-      {% if user.role.value == 'ADMIN' and not claim.approver_id %}
-        <form method="post" action="/app/claims/{{ claim.id }}/route-to-me">
-          <button class="btn" type="submit">Route to me</button>
-        </form>
-      {% endif %}
-      {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
-        <form method="post" action="/app/claims/{{ claim.id }}/submit">
-          <button class="btn btn-accent" type="submit">
-            {% if claim.status.value == 'CHANGES_REQUESTED' %}
-              Resubmit for Review
-            {% else %}
-              Submit for Review
-            {% endif %}
-          </button>
-        </form>
-      {% endif %}
-      <form method="post" action="/app/claims/{{ claim.id }}/export">
-        <button class="btn" type="submit">Export</button>
+    {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
+      <form method="post" action="/app/claims/{{ claim.id }}/submit">
+        <button class="btn btn-primary" type="submit">
+          {% if claim.status.value == 'CHANGES_REQUESTED' %}Resubmit{% else %}Submit for review{% endif %}
+        </button>
       </form>
-      {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
+    {% endif %}
+    {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
+      <div class="btn-row">
         <form method="post" action="/app/claims/{{ claim.id }}/approve">
           <button class="btn btn-primary" type="submit">Approve</button>
         </form>
         <form method="post" action="/app/claims/{{ claim.id }}/request-changes">
           <button class="btn" type="submit">Request changes</button>
         </form>
-        <form method="post" action="/app/claims/{{ claim.id }}/reject">
-          <button class="btn btn-danger" type="submit">Reject</button>
-        </form>
-      {% endif %}
-      {% if claim.status.value == 'DRAFT' %}
-        <form method="post" action="/app/claims/{{ claim.id }}/delete" onsubmit="return confirm('Delete this claim? This cannot be undone.');">
-          <button class="btn btn-danger" type="submit">Delete</button>
-        </form>
-      {% endif %}
-    </div>
+      </div>
+    {% endif %}
   </div>
 
-  <!-- Alerts -->
-  {% if violations|length > 0 %}
-  <div class="alerts-bar">
-    {% for v in violations %}
-      {% if v.status.value != 'RESOLVED' %}
-        <div class="alert-item {% if v.severity.value == 'FAIL' %}alert-item--error{% else %}alert-item--warn{% endif %}">
-          {{ v.title }}
-        </div>
-      {% endif %}
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  <!-- Main workspace -->
+  <!-- Two column layout -->
   <div class="workspace">
-    <!-- Left column: Details & Upload -->
+    
+    <!-- Main column -->
     <div class="workspace-main">
-      
-      <!-- Trip Details Section -->
-      <section class="section">
-        <h2 class="section-label">Trip Details</h2>
-        <form method="post" action="/app/claims/{{ claim.id }}/update" class="details-form">
-          <div class="form-row">
-            <div class="form-field">
-              <label>Start Date</label>
-              <input type="date" name="travel_start_date" value="{{ claim.travel_start_date or '' }}" />
-            </div>
-            <div class="form-field">
-              <label>End Date</label>
-              <input type="date" name="travel_end_date" value="{{ claim.travel_end_date or '' }}" />
-            </div>
-          </div>
-          <div class="form-field">
-            <label>Purpose of Trip</label>
-            <textarea name="purpose" rows="3" placeholder="Describe the business purpose...">{{ claim.purpose or '' }}</textarea>
-          </div>
-          <button class="btn btn-sm" type="submit">Save</button>
-        </form>
-      </section>
 
-      <!-- Upload Section -->
-      <section class="section">
-        <h2 class="section-label">Receipts & Documents</h2>
-        <form method="post" action="/app/claims/{{ claim.id }}/upload" enctype="multipart/form-data">
-          <div id="dropzone" class="dropzone">
-            <div class="dropzone-content">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <!-- Step 1: Trip Info (compact when filled, expandable) -->
+      <details class="step-card" {% if not claim.purpose or not claim.travel_start_date %}open{% endif %}>
+        <summary class="step-header">
+          <span class="step-number">1</span>
+          <span class="step-title">Trip details</span>
+          {% if claim.purpose and claim.travel_start_date and claim.travel_end_date %}
+            <span class="pill ok" style="margin-left: auto;">Complete</span>
+          {% else %}
+            <span class="pill warn" style="margin-left: auto;">Required</span>
+          {% endif %}
+        </summary>
+        <div class="step-body">
+          <form method="post" action="/app/claims/{{ claim.id }}/update" class="compact-form">
+            <div class="form-grid-3">
+              <div class="form-field">
+                <label>Start</label>
+                <input type="date" name="travel_start_date" value="{{ claim.travel_start_date or '' }}" />
+              </div>
+              <div class="form-field">
+                <label>End</label>
+                <input type="date" name="travel_end_date" value="{{ claim.travel_end_date or '' }}" />
+              </div>
+              <div class="form-field">
+                <label>Purpose</label>
+                <input name="purpose" value="{{ claim.purpose or '' }}" placeholder="e.g. Client meetings in Singapore" />
+              </div>
+            </div>
+            <button class="btn btn-sm" type="submit">Save</button>
+          </form>
+        </div>
+      </details>
+
+      <!-- Step 2: Upload Receipts -->
+      <div class="step-card">
+        <div class="step-header">
+          <span class="step-number">2</span>
+          <span class="step-title">Upload receipts</span>
+          {% if docs|length > 0 %}
+            <span class="muted" style="margin-left: auto;">{{ docs|length }} file(s)</span>
+          {% endif %}
+        </div>
+        <div class="step-body">
+          <form method="post" action="/app/claims/{{ claim.id }}/upload" enctype="multipart/form-data">
+            <div id="dropzone" class="dropzone">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
                 <polyline points="17 8 12 3 7 8"/>
                 <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
-              <span>Drop files here or click to browse</span>
-              <span class="muted">PDF, images, ZIP, or .eml files</span>
+              <span>Drop files or click to browse</span>
             </div>
-          </div>
-          <input id="file-input" type="file" name="uploads" multiple accept=".pdf,.zip,.eml,image/*" required style="display:none;" />
-          <button class="btn btn-accent mt-1" type="submit">Upload & Extract</button>
-        </form>
-        <script>
-          (function() {
-            const dz = document.getElementById('dropzone');
-            const input = document.getElementById('file-input');
-            if (!dz || !input) return;
-            dz.addEventListener('click', () => input.click());
-            dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dropzone--active'); });
-            dz.addEventListener('dragleave', () => dz.classList.remove('dropzone--active'));
-            dz.addEventListener('drop', (e) => { e.preventDefault(); dz.classList.remove('dropzone--active'); if (e.dataTransfer && e.dataTransfer.files) input.files = e.dataTransfer.files; });
-            input.addEventListener('change', () => {
-              const c = dz.querySelector('.dropzone-content span');
-              const count = (input.files && input.files.length) ? input.files.length : 0;
-              if (c) c.textContent = count ? (count + ' file(s) selected') : 'Drop files here or click to browse';
-            });
-          })();
-        </script>
-
-        {% if docs|length > 0 %}
-        <div class="file-list">
-          {% for d in docs %}
-            <div class="file-item">
-              <a href="/app/documents/{{ d.id }}/download" class="file-name">{{ d.filename }}</a>
-              {% if d.status.value == 'PROCESSED' %}
-                <span class="pill ok">Processed</span>
-              {% elif d.status.value == 'FAILED' %}
-                <span class="pill bad">Failed</span>
-              {% elif d.status.value == 'PROCESSING' %}
-                <span class="pill info">Processing...</span>
-              {% else %}
-                <span class="pill">{{ d.status.value }}</span>
-              {% endif %}
+            <input id="file-input" type="file" name="uploads" multiple accept=".pdf,.zip,.eml,image/*" required style="display:none;" />
+            <button class="btn btn-sm mt-1" type="submit">Upload</button>
+          </form>
+          <script>
+            (function() {
+              const dz = document.getElementById('dropzone');
+              const input = document.getElementById('file-input');
+              if (!dz || !input) return;
+              dz.addEventListener('click', () => input.click());
+              dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dropzone--active'); });
+              dz.addEventListener('dragleave', () => dz.classList.remove('dropzone--active'));
+              dz.addEventListener('drop', (e) => { e.preventDefault(); dz.classList.remove('dropzone--active'); if (e.dataTransfer?.files) input.files = e.dataTransfer.files; });
+              input.addEventListener('change', () => {
+                const span = dz.querySelector('span');
+                if (span) span.textContent = input.files?.length ? `${input.files.length} file(s) selected` : 'Drop files or click to browse';
+              });
+            })();
+          </script>
+          {% if docs|length > 0 %}
+            <div class="file-list">
+              {% for d in docs %}
+                <div class="file-item">
+                  <a href="/app/documents/{{ d.id }}/download">{{ d.filename }}</a>
+                  {% if d.status.value == 'PROCESSED' %}<span class="pill ok">Done</span>
+                  {% elif d.status.value == 'FAILED' %}<span class="pill bad">Failed</span>
+                  {% elif d.status.value == 'PROCESSING' %}<span class="pill">Processing</span>
+                  {% else %}<span class="pill">{{ d.status.value }}</span>{% endif %}
+                </div>
+              {% endfor %}
             </div>
-          {% endfor %}
+          {% endif %}
         </div>
-        {% endif %}
-      </section>
+      </div>
 
-      <!-- Expense Items Section -->
-      <section class="section">
-        <h2 class="section-label">Expense Items</h2>
-        <div class="callout mt-1">
-          Add missing items manually when a receipt isn't recognized.
+      <!-- Step 3: Review Expenses -->
+      <div class="step-card">
+        <div class="step-header">
+          <span class="step-number">3</span>
+          <span class="step-title">Review expenses</span>
+          {% if items|length > 0 %}
+            <span class="muted" style="margin-left: auto;">{{ items|length }} item(s)</span>
+          {% endif %}
         </div>
-
-        <form method="post" action="/app/claims/{{ claim.id }}/items/new" class="details-form mt-1">
-          <div class="form-row">
-            <div class="form-field">
-              <label>Vendor</label>
-              <input name="vendor" placeholder="e.g. Marriott, Delta, Restaurant" required />
-            </div>
-            <div class="form-field">
-              <label>Date</label>
-              <input type="date" name="transaction_date" />
-            </div>
-          </div>
-          <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr;">
-            <div class="form-field">
-              <label>Category</label>
-              <select name="category">
-                <option value="">—</option>
-                {% for c in expense_categories %}
-                  <option value="{{ c }}">{{ c }}</option>
-                {% endfor %}
-              </select>
-            </div>
-            <div class="form-field">
-              <label>Amount</label>
-              <input name="amount_original_amount" placeholder="e.g. 123.45" required />
-            </div>
-            <div class="form-field">
-              <label>Currency</label>
-              <select name="amount_original_currency" required>
-                {% for cur in currency_options %}
-                  <option value="{{ cur }}" {% if cur == claim.home_currency %}selected{% endif %}>{{ cur }}</option>
-                {% endfor %}
-              </select>
-            </div>
-          </div>
-          <div class="form-field">
-            <label>Description</label>
-            <input name="description" placeholder="Optional notes (e.g., dinner with client)" />
-          </div>
-
-          <details class="mt-1">
-            <summary class="muted">Policy details (optional)</summary>
-            <div class="form-row mt-1" style="grid-template-columns: 1fr 1fr;">
-              <div class="form-field">
-                <label>Hotel nights</label>
-                <input name="hotel_nights" placeholder="e.g. 2" />
+        <div class="step-body">
+          {% if items|length == 0 %}
+            <p class="empty-text">Upload receipts to see extracted expenses here.</p>
+          {% else %}
+            <div class="expenses-table">
+              <div class="expenses-header">
+                <span>Date</span>
+                <span>Vendor</span>
+                <span>Description</span>
+                <span class="text-right">Amount</span>
+                <span class="text-right">{{ claim.home_currency }}</span>
+                <span></span>
               </div>
-              <div class="form-field">
-                <label>Meal attendees (if applicable)</label>
-                <input name="attendees" placeholder="Names or count" />
-              </div>
-            </div>
-            <div class="form-row" style="grid-template-columns: 1fr 1fr;">
-              <div class="form-field">
-                <label>Flight duration (hours)</label>
-                <input name="flight_duration_hours" placeholder="e.g. 5.5" />
-              </div>
-              <div class="form-field">
-                <label>Flight cabin class</label>
-                <select name="flight_cabin_class">
-                  <option value="">—</option>
-                  <option value="economy">economy</option>
-                  <option value="premium_economy">premium_economy</option>
-                  <option value="business">business</option>
-                  <option value="first">first</option>
-                </select>
-              </div>
-            </div>
-          </details>
-
-          <div class="mt-1">
-            <label style="display:flex;align-items:center;gap:8px;">
-              <input type="checkbox" name="employee_reviewed" checked />
-              Mark reviewed
-            </label>
-          </div>
-
-          <button class="btn btn-sm mt-1" type="submit">Add item</button>
-        </form>
-
-        {% if edit_item %}
-          <div id="edit-item" class="callout mt-2">
-            Editing item: <span class="mono">{{ edit_item.id }}</span>
-            <a href="/app/claims/{{ claim.id }}" class="muted" style="margin-left: 10px;">Cancel</a>
-          </div>
-          <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/update" class="details-form mt-1">
-            <div class="form-row">
-              <div class="form-field">
-                <label>Vendor</label>
-                <input name="vendor" value="{{ edit_item.vendor }}" required />
-              </div>
-              <div class="form-field">
-                <label>Date</label>
-                <input type="date" name="transaction_date" value="{{ edit_item.transaction_date or '' }}" />
-              </div>
-            </div>
-            <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr;">
-              <div class="form-field">
-                <label>Category</label>
-                <select name="category">
-                  <option value="">—</option>
-                  {% for c in expense_categories %}
-                    <option value="{{ c }}" {% if edit_item.category == c %}selected{% endif %}>{{ c }}</option>
-                  {% endfor %}
-                </select>
-              </div>
-              <div class="form-field">
-                <label>Amount</label>
-                <input name="amount_original_amount" value="{{ '%.2f'|format(edit_item.amount_original_amount) }}" required />
-              </div>
-              <div class="form-field">
-                <label>Currency</label>
-                <select name="amount_original_currency" required>
-                  {% for cur in currency_options %}
-                    <option value="{{ cur }}" {% if cur == edit_item.amount_original_currency %}selected{% endif %}>{{ cur }}</option>
-                  {% endfor %}
-                </select>
-              </div>
-            </div>
-            <div class="form-field">
-              <label>Description</label>
-              <input name="description" value="{{ edit_item.description or '' }}" />
-            </div>
-
-            <details class="mt-1" open>
-              <summary class="muted">Policy details</summary>
-              <div class="form-row mt-1" style="grid-template-columns: 1fr 1fr;">
-                <div class="form-field">
-                  <label>Hotel nights</label>
-                  <input name="hotel_nights" value="{{ edit_item.metadata_json.get('hotel_nights', '') }}" />
+              {% for i in items %}
+                <div class="expense-row">
+                  <span class="muted">{{ i.transaction_date or '—' }}</span>
+                  <span>{{ i.vendor }}</span>
+                  <span class="muted">{{ i.description|truncate(30) if i.description else '—' }}</span>
+                  <span class="text-right mono">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</span>
+                  <span class="text-right mono">{% if i.amount_home_amount is not none %}{{ '%.2f'|format(i.amount_home_amount) }}{% else %}<span class="muted">—</span>{% endif %}</span>
+                  <span class="text-right"><a href="/app/claims/{{ claim.id }}?edit_item_id={{ i.id }}#edit-item" class="link-muted">Edit</a></span>
                 </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          <!-- Add manual item (collapsed) -->
+          <details class="mt-2" id="add-manual">
+            <summary class="muted">Add item manually</summary>
+            <form method="post" action="/app/claims/{{ claim.id }}/items/new" class="compact-form mt-1">
+              <div class="form-grid-4">
+                <div class="form-field"><label>Vendor</label><input name="vendor" placeholder="e.g. Marriott" required /></div>
+                <div class="form-field"><label>Date</label><input type="date" name="transaction_date" /></div>
+                <div class="form-field"><label>Amount</label><input name="amount_original_amount" placeholder="123.45" required /></div>
                 <div class="form-field">
-                  <label>Meal attendees</label>
-                  <input name="attendees" value="{{ edit_item.metadata_json.get('attendees', '') }}" />
-                </div>
-              </div>
-              <div class="form-row" style="grid-template-columns: 1fr 1fr;">
-                <div class="form-field">
-                  <label>Flight duration (hours)</label>
-                  <input name="flight_duration_hours" value="{{ edit_item.metadata_json.get('flight_duration_hours', '') }}" />
-                </div>
-                <div class="form-field">
-                  <label>Flight cabin class</label>
-                  <select name="flight_cabin_class">
-                    <option value="">—</option>
-                    {% set cabin = edit_item.metadata_json.get('flight_cabin_class', '') %}
-                    <option value="economy" {% if cabin == 'economy' %}selected{% endif %}>economy</option>
-                    <option value="premium_economy" {% if cabin == 'premium_economy' %}selected{% endif %}>premium_economy</option>
-                    <option value="business" {% if cabin == 'business' %}selected{% endif %}>business</option>
-                    <option value="first" {% if cabin == 'first' %}selected{% endif %}>first</option>
+                  <label>Currency</label>
+                  <select name="amount_original_currency" required>
+                    {% for cur in currency_options %}<option value="{{ cur }}" {% if cur == claim.home_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}
                   </select>
                 </div>
               </div>
-            </details>
-
-            <div class="mt-1">
-              <label style="display:flex;align-items:center;gap:8px;">
-                <input type="checkbox" name="employee_reviewed" {% if edit_item.metadata_json.get('employee_reviewed') %}checked{% endif %} />
-                Mark reviewed
-              </label>
-            </div>
-
-            <div class="btn-row mt-1">
-              <button class="btn btn-sm btn-primary" type="submit">Save item</button>
-            </div>
-          </form>
-          <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/delete" onsubmit="return confirm('Delete this item?');" class="mt-1">
-            <button class="btn btn-sm btn-danger" type="submit">Delete</button>
-          </form>
-        {% endif %}
-
-        {% if items|length == 0 %}
-          <p class="empty-text">No items yet. Upload receipts to extract expenses.</p>
-        {% else %}
-          <div class="expenses-table">
-            <div class="expenses-header">
-              <span>Date</span>
-              <span>Vendor</span>
-              <span>Description</span>
-              <span class="text-right">Amount</span>
-              <span class="text-right">{{ claim.home_currency }}</span>
-              <span class="text-right">Edit</span>
-            </div>
-            {% for i in items %}
-              <div class="expense-row">
-                <span class="muted">{{ i.transaction_date or '—' }}</span>
-                <span>{{ i.vendor }}</span>
-                <span class="muted">{{ i.description or '—' }}</span>
-                <span class="text-right mono">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</span>
-                <span class="text-right mono">
-                  {% if i.amount_home_amount is not none %}
-                    {{ '%.2f'|format(i.amount_home_amount) }}
-                  {% else %}
-                    <span class="muted">—</span>
-                  {% endif %}
-                </span>
-                <span class="text-right">
-                  <a class="btn btn-sm" href="/app/claims/{{ claim.id }}?edit_item_id={{ i.id }}#edit-item">Edit</a>
-                </span>
+              <div class="form-grid-2">
+                <div class="form-field">
+                  <label>Category</label>
+                  <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
+                </div>
+                <div class="form-field"><label>Description</label><input name="description" placeholder="Optional notes" /></div>
               </div>
-            {% endfor %}
-          </div>
-        {% endif %}
-      </section>
+              <input type="hidden" name="employee_reviewed" value="on" />
+              <button class="btn btn-sm" type="submit">Add</button>
+            </form>
+          </details>
+
+          {% if edit_item %}
+            <div id="edit-item" class="edit-panel mt-2">
+              <div class="edit-panel-header">
+                <strong>Editing: {{ edit_item.vendor }}</strong>
+                <a href="/app/claims/{{ claim.id }}" class="muted">Cancel</a>
+              </div>
+              <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/update" class="compact-form">
+                <div class="form-grid-4">
+                  <div class="form-field"><label>Vendor</label><input name="vendor" value="{{ edit_item.vendor }}" required /></div>
+                  <div class="form-field"><label>Date</label><input type="date" name="transaction_date" value="{{ edit_item.transaction_date or '' }}" /></div>
+                  <div class="form-field"><label>Amount</label><input name="amount_original_amount" value="{{ '%.2f'|format(edit_item.amount_original_amount) }}" required /></div>
+                  <div class="form-field">
+                    <label>Currency</label>
+                    <select name="amount_original_currency" required>{% for cur in currency_options %}<option value="{{ cur }}" {% if cur == edit_item.amount_original_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}</select>
+                  </div>
+                </div>
+                <div class="form-grid-2">
+                  <div class="form-field">
+                    <label>Category</label>
+                    <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}" {% if edit_item.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+                  </div>
+                  <div class="form-field"><label>Description</label><input name="description" value="{{ edit_item.description or '' }}" /></div>
+                </div>
+                <div class="form-grid-4">
+                  <div class="form-field"><label>Hotel nights</label><input name="hotel_nights" value="{{ edit_item.metadata_json.get('hotel_nights', '') }}" placeholder="e.g. 2" /></div>
+                  <div class="form-field"><label>Attendees</label><input name="attendees" value="{{ edit_item.metadata_json.get('attendees', '') }}" placeholder="For meals >$100" /></div>
+                  <div class="form-field"><label>Flight hours</label><input name="flight_duration_hours" value="{{ edit_item.metadata_json.get('flight_duration_hours', '') }}" /></div>
+                  <div class="form-field">
+                    <label>Cabin</label>
+                    <select name="flight_cabin_class">
+                      <option value="">—</option>
+                      {% set cabin = edit_item.metadata_json.get('flight_cabin_class', '') %}
+                      <option value="economy" {% if cabin == 'economy' %}selected{% endif %}>Economy</option>
+                      <option value="premium_economy" {% if cabin == 'premium_economy' %}selected{% endif %}>Premium</option>
+                      <option value="business" {% if cabin == 'business' %}selected{% endif %}>Business</option>
+                      <option value="first" {% if cabin == 'first' %}selected{% endif %}>First</option>
+                    </select>
+                  </div>
+                </div>
+                <input type="hidden" name="employee_reviewed" value="on" />
+                <div class="btn-row">
+                  <button class="btn btn-sm btn-primary" type="submit">Save</button>
+                  <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/delete" onsubmit="return confirm('Delete?');" style="display:inline;">
+                    <button class="btn btn-sm" type="submit" style="color: var(--danger);">Delete</button>
+                  </form>
+                </div>
+              </form>
+            </div>
+          {% endif %}
+        </div>
+      </div>
 
     </div>
 
-    <!-- Right column: Tasks & FX -->
+    <!-- Sidebar -->
     <aside class="workspace-sidebar">
-      
+
       <!-- Tasks -->
-      <section class="sidebar-section">
-        <h3 class="sidebar-label">To Do</h3>
-        {% if tasks|length == 0 %}
-          <p class="empty-text">No tasks</p>
-        {% else %}
-          <div class="task-list">
-            {% for t in tasks %}
-              <div class="task-item {% if t.status.value == 'RESOLVED' %}task-item--done{% endif %}">
-                <div style="flex:1;">
-                  <span class="task-title">{{ t.title }}</span>
-                  {% if t.description %}
-                    <div class="muted" style="margin-top: 2px;">{{ t.description }}</div>
-                  {% endif %}
-                </div>
-                {% if t.status.value == 'OPEN' %}
-                  <form method="post" action="/app/tasks/{{ t.id }}/resolve">
-                    <input type="hidden" name="claim_id" value="{{ claim.id }}" />
-                    <button class="btn btn-sm" type="submit">Done</button>
-                  </form>
-                {% else %}
-                  <span class="pill ok">Done</span>
-                {% endif %}
-              </div>
-            {% endfor %}
-          </div>
-        {% endif %}
-      </section>
+      {% if tasks|length > 0 %}
+      <div class="sidebar-card">
+        <h3 class="sidebar-label">To do</h3>
+        <div class="task-list">
+          {% for t in tasks %}
+            {% if t.status.value == 'OPEN' %}
+            <div class="task-item">
+              <span>{{ t.title }}</span>
+              <form method="post" action="/app/tasks/{{ t.id }}/resolve">
+                <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                <button class="btn btn-xs" type="submit">Done</button>
+              </form>
+            </div>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
 
       <!-- FX Rates -->
-      <section class="sidebar-section">
+      <div class="sidebar-card">
         <h3 class="sidebar-label">FX Rates</h3>
-        <form method="post" action="/app/claims/{{ claim.id }}/fx">
-          <div class="form-field">
-            <label>USD → {{ claim.home_currency }}</label>
-            <input name="usd_to_home" placeholder="e.g. 1.35" />
-          </div>
-          <div class="form-field">
-            <label>CAD → {{ claim.home_currency }}</label>
-            <input name="cad_to_home" placeholder="e.g. 1.00" />
-          </div>
-          <div class="form-field">
-            <label>GBP → {{ claim.home_currency }}</label>
-            <input name="gbp_to_home" placeholder="e.g. 1.70" />
-          </div>
-          <div class="form-field">
-            <label>EUR → {{ claim.home_currency }}</label>
-            <input name="eur_to_home" placeholder="e.g. 1.45" />
-          </div>
-          <button class="btn btn-sm" type="submit">Save</button>
+        <form method="post" action="/app/claims/{{ claim.id }}/fx/auto" class="mb-1">
+          <button class="btn btn-sm" type="submit" style="width:100%;">Auto-fill rates</button>
         </form>
-      </section>
+        <form method="post" action="/app/claims/{{ claim.id }}/fx" class="fx-form">
+          <div class="fx-row"><label>USD</label><input name="usd_to_home" value="{{ fx_values.get('USD', '') }}" placeholder="1.35" /></div>
+          <div class="fx-row"><label>CAD</label><input name="cad_to_home" value="{{ fx_values.get('CAD', '') }}" placeholder="1.00" /></div>
+          <div class="fx-row"><label>GBP</label><input name="gbp_to_home" value="{{ fx_values.get('GBP', '') }}" placeholder="1.70" /></div>
+          <div class="fx-row"><label>EUR</label><input name="eur_to_home" value="{{ fx_values.get('EUR', '') }}" placeholder="1.45" /></div>
+          <button class="btn btn-sm mt-1" type="submit" style="width:100%;">Save rates</button>
+        </form>
+      </div>
 
-      <!-- Exports -->
-      <section class="sidebar-section">
-        <h3 class="sidebar-label">Exports</h3>
-        {% if exports|length == 0 %}
-          <p class="empty-text">No exports yet</p>
-        {% else %}
-          <div class="export-list">
+      <!-- Export -->
+      <div class="sidebar-card">
+        <h3 class="sidebar-label">Export</h3>
+        <form method="post" action="/app/claims/{{ claim.id }}/export">
+          <button class="btn btn-sm" type="submit" style="width:100%;">Generate</button>
+        </form>
+        {% if exports|length > 0 %}
+          <div class="export-links mt-1">
             {% for e in exports %}
-              <div class="export-item">
-                {% if e.status.value == 'COMPLETED' %}
-                  {% if e.summary_xlsx_key %}
-                    <a class="btn btn-sm" href="/app/exports/{{ e.id }}/download/summary">Summary.xlsx</a>
-                  {% endif %}
-                  {% if e.supporting_zip_key %}
-                    <a class="btn btn-sm" href="/app/exports/{{ e.id }}/download/supporting">Documents.zip</a>
-                  {% endif %}
-                {% elif e.status.value == 'FAILED' %}
-                  <span class="pill bad">Export failed</span>
-                {% else %}
-                  <span class="pill">{{ e.status.value }}</span>
-                {% endif %}
-              </div>
+              {% if e.status.value == 'COMPLETED' %}
+                {% if e.summary_xlsx_key %}<a href="/app/exports/{{ e.id }}/download/summary" class="export-link">Summary.xlsx</a>{% endif %}
+                {% if e.supporting_pdf_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.pdf</a>{% elif e.supporting_zip_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.zip</a>{% endif %}
+              {% endif %}
             {% endfor %}
           </div>
         {% endif %}
-      </section>
+      </div>
+
+      <!-- Actions -->
+      <div class="sidebar-card sidebar-card--muted">
+        {% if user.role.value == 'ADMIN' and not claim.approver_id %}
+          <form method="post" action="/app/claims/{{ claim.id }}/route-to-me" class="mb-1">
+            <button class="btn btn-sm" type="submit" style="width:100%;">Route to me</button>
+          </form>
+        {% endif %}
+        {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
+          <form method="post" action="/app/claims/{{ claim.id }}/reject" class="mb-1">
+            <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Reject</button>
+          </form>
+        {% endif %}
+        {% if claim.status.value == 'DRAFT' %}
+          <form method="post" action="/app/claims/{{ claim.id }}/delete" onsubmit="return confirm('Delete this claim?');">
+            <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Delete claim</button>
+          </form>
+        {% endif %}
+      </div>
 
     </aside>
   </div>
 
 <style>
-/* Claim Detail Workspace Styles */
-.breadcrumb {
-  margin-bottom: 20px;
-}
+.claim-header { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; margin-bottom:32px; flex-wrap:wrap; }
+.claim-meta { display:flex; align-items:center; gap:10px; margin-top:6px; flex-wrap:wrap; }
+.breadcrumb-link { display:inline-flex; align-items:center; gap:4px; font-size:13px; color:var(--text-muted); text-decoration:none; }
+.breadcrumb-link:hover { color:var(--text-primary); text-decoration:none; }
 
-.breadcrumb-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  text-decoration: none;
-  transition: color 0.15s ease;
-}
+.workspace { display:grid; grid-template-columns:1fr 260px; gap:32px; align-items:start; }
+@media (max-width:900px) { .workspace { grid-template-columns:1fr; } }
+.workspace-main { display:flex; flex-direction:column; gap:20px; }
+.workspace-sidebar { display:flex; flex-direction:column; gap:16px; }
 
-.breadcrumb-link:hover {
-  color: var(--text-primary);
-  text-decoration: none;
-}
+.step-card { background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:var(--radius); }
+.step-header { display:flex; align-items:center; gap:12px; padding:16px 20px; cursor:pointer; }
+.step-header::-webkit-details-marker { display:none; }
+details.step-card > .step-header { list-style:none; }
+.step-number { width:24px; height:24px; border-radius:50%; background:var(--accent-bg); color:var(--accent); font-size:12px; font-weight:600; display:flex; align-items:center; justify-content:center; }
+.step-title { font-weight:500; color:var(--text-primary); }
+.step-body { padding:0 20px 20px; }
 
-.claim-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
+.sidebar-card { background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:var(--radius); padding:16px; }
+.sidebar-card--muted { background:var(--bg-elevated); }
+.sidebar-label { font-size:11px; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:var(--text-muted); margin:0 0 12px; }
 
-.claim-header-main { flex: 1; }
+.compact-form .form-field { margin-bottom:12px; }
+.compact-form .form-field label { font-size:11px; font-weight:500; color:var(--text-secondary); margin-bottom:4px; display:block; }
+.compact-form input, .compact-form select { font-size:13px; padding:8px 10px; }
+.form-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.form-grid-3 { display:grid; grid-template-columns:1fr 1fr 2fr; gap:12px; }
+.form-grid-4 { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+@media (max-width:700px) { .form-grid-3, .form-grid-4 { grid-template-columns:1fr 1fr; } }
 
-.claim-meta {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
+.dropzone { border:2px dashed var(--border-standard); border-radius:var(--radius-sm); padding:24px; text-align:center; cursor:pointer; background:var(--bg-elevated); display:flex; flex-direction:column; align-items:center; gap:8px; color:var(--text-muted); font-size:13px; transition:all 0.15s; }
+.dropzone:hover, .dropzone--active { border-color:var(--accent); background:var(--accent-bg); }
+.dropzone svg { opacity:0.4; }
 
-.alerts-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 24px;
-}
+.file-list { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
+.file-item { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--bg-elevated); border-radius:6px; font-size:13px; }
+.file-item a { color:var(--accent); font-weight:500; }
 
-.alert-item {
-  padding: 8px 14px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-}
+.expenses-table { border:1px solid var(--border-subtle); border-radius:var(--radius-sm); overflow:hidden; margin-top:8px; }
+.expenses-header, .expense-row { display:grid; grid-template-columns:80px 100px 1fr 90px 70px 50px; gap:8px; padding:10px 14px; align-items:center; font-size:13px; }
+.expenses-header { background:var(--bg-elevated); font-size:10px; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:var(--text-muted); }
+.expense-row { border-top:1px solid var(--border-subtle); }
+.expense-row:hover { background:var(--bg-hover); }
+.link-muted { color:var(--text-muted); font-size:12px; }
+.link-muted:hover { color:var(--accent); }
 
-.alert-item--error {
-  background: var(--danger-bg);
-  color: var(--danger);
-  border: 1px solid var(--danger-border);
-}
+.edit-panel { background:var(--accent-bg); border:1px solid var(--accent-border); border-radius:var(--radius-sm); padding:16px; }
+.edit-panel-header { display:flex; justify-content:space-between; margin-bottom:12px; }
 
-.alert-item--warn {
-  background: var(--warn-bg);
-  color: var(--warn);
-  border: 1px solid var(--warn-border);
-}
+.task-list { display:flex; flex-direction:column; gap:8px; }
+.task-item { display:flex; justify-content:space-between; align-items:center; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-subtle); }
+.task-item:last-child { border-bottom:none; }
 
-.workspace {
-  display: grid;
-  grid-template-columns: 1fr 280px;
-  gap: 32px;
-  align-items: start;
-}
+.fx-form { margin-top:8px; }
+.fx-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.fx-row label { width:36px; font-size:12px; font-weight:500; color:var(--text-muted); }
+.fx-row input { flex:1; font-size:13px; padding:6px 8px; }
 
-@media (max-width: 900px) {
-  .workspace {
-    grid-template-columns: 1fr;
-  }
-}
+.export-links { display:flex; flex-direction:column; gap:6px; }
+.export-link { font-size:13px; color:var(--accent); }
 
-.workspace-main {
-  display: flex;
-  flex-direction: column;
-  gap: 32px;
-}
-
-.workspace-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.section { }
-
-.section-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  margin-bottom: 16px;
-}
-
-.sidebar-section {
-  background: var(--bg-elevated);
-  border-radius: var(--radius);
-  padding: 16px;
-}
-
-.sidebar-label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  margin: 0 0 12px 0;
-}
-
-.details-form .form-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-
-.details-form .form-field {
-  margin-bottom: 16px;
-}
-
-.details-form textarea {
-  min-height: 80px;
-}
-
-.dropzone {
-  border: 2px dashed var(--border-standard);
-  border-radius: var(--radius);
-  padding: 32px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  background: var(--bg-elevated);
-}
-
-.dropzone:hover,
-.dropzone--active {
-  border-color: var(--accent);
-  background: var(--accent-bg);
-}
-
-.dropzone-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-secondary);
-}
-
-.dropzone-content svg {
-  opacity: 0.5;
-}
-
-.file-list {
-  margin-top: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.file-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-}
-
-.file-name {
-  color: var(--accent);
-  font-weight: 500;
-}
-
-.expenses-table {
-  border: 1px solid var(--border-standard);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-
-.expenses-header,
-.expense-row {
-  display: grid;
-  grid-template-columns: 90px 120px 1fr 100px 80px 70px;
-  gap: 12px;
-  padding: 12px 16px;
-  align-items: center;
-}
-
-.expenses-header {
-  background: var(--bg-elevated);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.expense-row {
-  border-top: 1px solid var(--border-subtle);
-  font-size: 13px;
-}
-
-.expense-row:hover {
-  background: var(--bg-hover);
-}
-
-.empty-text {
-  color: var(--text-muted);
-  font-size: 13px;
-  margin: 0;
-}
-
-.task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.task-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.task-item:last-child {
-  border-bottom: none;
-}
-
-.task-item--done .task-title {
-  text-decoration: line-through;
-  color: var(--text-muted);
-}
-
-.task-title {
-  font-size: 13px;
-  flex: 1;
-}
-
-.sidebar-section .form-field {
-  margin-bottom: 12px;
-}
-
-.sidebar-section input {
-  font-size: 13px;
-  padding: 8px 10px;
-}
-
-.export-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.export-item {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
+.empty-text { color:var(--text-muted); font-size:13px; margin:0; }
+.btn-xs { font-size:11px; padding:4px 8px; }
 </style>
 {% endblock %}
