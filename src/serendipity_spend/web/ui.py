@@ -522,6 +522,7 @@ def claim_detail(
     policy_ok = request.query_params.get("policy_ok")
     approve_error = request.query_params.get("approve_error")
     approve_ok = request.query_params.get("approve_ok")
+    delete_error = request.query_params.get("delete_error")
 
     return templates.TemplateResponse(
         "claim_detail.html",
@@ -555,6 +556,7 @@ def claim_detail(
             "policy_ok": policy_ok,
             "approve_error": approve_error,
             "approve_ok": approve_ok,
+            "delete_error": delete_error,
             "route_targets": route_targets,
             "expense_categories": [
                 "transport",
@@ -773,8 +775,11 @@ def delete_claim_ui(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     try:
         delete_claim(session, claim=claim, user=user)
-    except Exception:  # noqa: BLE001
-        return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+    except HTTPException as e:
+        detail = e.detail if isinstance(e.detail, str) else "Could not delete claim."
+        return RedirectResponse(url=f"/app/claims/{claim.id}?delete_error={quote(detail)}", status_code=303)
+    except Exception as e:  # noqa: BLE001
+        return RedirectResponse(url=f"/app/claims/{claim.id}?delete_error={quote(str(e))}", status_code=303)
     return RedirectResponse(url="/app", status_code=303)
 
 
