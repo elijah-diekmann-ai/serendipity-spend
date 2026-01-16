@@ -19,7 +19,7 @@
         <nav class="sidebar-nav">
           {% set path = request.url.path %}
           <div class="nav-section-label">Menu</div>
-          <a class="nav-link {% if path == '/app' or (path.startswith('/app/claims/') and path != '/app/claims/new') %}active{% endif %}" href="/app">
+          <a class="nav-link {% if path == '/app' or path.startswith('/app/claims/') %}active{% endif %}" href="/app">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="3" width="7" height="9"></rect>
               <rect x="14" y="3" width="7" height="5"></rect>
@@ -27,13 +27,6 @@
               <rect x="3" y="16" width="7" height="5"></rect>
             </svg>
             <span>Claims</span>
-          </a>
-          <a class="nav-link {% if path == '/app/claims/new' %}active{% endif %}" href="/app/claims/new">
-            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 5v14"></path>
-              <path d="M5 12h14"></path>
-            </svg>
-            <span>New claim</span>
           </a>
           <a class="nav-link {% if path.startswith('/app/tasks') %}active{% endif %}" href="/app/tasks">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
