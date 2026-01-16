@@ -67,7 +67,7 @@
           {% endif %}
         </summary>
         <div class="step-body">
-          <form method="post" action="/app/claims/{{ claim.id }}/update" class="compact-form">
+          <form id="trip-form" method="post" action="/app/claims/{{ claim.id }}/update" class="compact-form">
             <div class="form-grid-3">
               <div class="form-field">
                 <label>Start</label>
@@ -82,8 +82,31 @@
                 <input name="purpose" value="{{ claim.purpose or '' }}" placeholder="e.g. Client meetings in Singapore" />
               </div>
             </div>
-            <button class="btn btn-sm" type="submit">Save</button>
+            <div class="btn-row">
+              <button class="btn btn-sm" type="submit">Save</button>
+              <span id="trip-status" class="muted" style="font-size:12px;"></span>
+            </div>
           </form>
+          <script>
+            (function() {
+              const form = document.getElementById('trip-form');
+              const status = document.getElementById('trip-status');
+              if (!form) return;
+              let timeout;
+              form.querySelectorAll('input').forEach(input => {
+                input.addEventListener('input', () => {
+                  clearTimeout(timeout);
+                  const start = form.querySelector('[name="travel_start_date"]').value;
+                  const end = form.querySelector('[name="travel_end_date"]').value;
+                  const purpose = form.querySelector('[name="purpose"]').value.trim();
+                  if (start && end && purpose) {
+                    if (status) status.textContent = 'Auto-saving...';
+                    timeout = setTimeout(() => form.submit(), 800);
+                  }
+                });
+              });
+            })();
+          </script>
         </div>
       </details>
 
