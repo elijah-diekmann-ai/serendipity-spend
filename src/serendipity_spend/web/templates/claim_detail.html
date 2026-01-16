@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
+  {# Filter out basic form requirements (R001, R002) - these are obvious from the form #}
+  {% set basic_rules = ['R001', 'R002'] %}
+  {% set receipt_violations = violations|selectattr('status.value', 'equalto', 'OPEN')|rejectattr('rule_id', 'in', basic_rules)|list %}
+  {% set has_receipt_issues = receipt_violations|length > 0 %}
+
   <!-- Header -->
   <div class="claim-header">
     <div>
@@ -62,10 +67,10 @@
   {% elif route_ok %}
     <div class="callout success mb-2">Claim routed.</div>
   {% endif %}
-  {% if policy_summary.open_count > 0 %}
+  {% if has_receipt_issues %}
     <div class="callout {% if policy_summary.blocking_count > 0 %}error{% else %}warning{% endif %} mb-2">
       <strong>Policy checks:</strong>
-      {{ policy_summary.open_count }} open issue(s){% if policy_summary.blocking_count > 0 %} ({{ policy_summary.blocking_count }} blocking submission){% endif %}.
+      {{ receipt_violations|length }} item(s) need review.
       <a href="#policy">Review</a>
     </div>
   {% endif %}
@@ -343,38 +348,17 @@
         </div>
       </div>
 
-      <!-- Step 4: Policy checks -->
-      <details class="step-card" id="policy" {% if policy_summary.open_count > 0 %}open{% endif %}>
+      <!-- Step 4: Policy checks (only shows receipt-related issues, not basic form requirements) -->
+      {% if has_receipt_issues %}
+      <details class="step-card" id="policy" open>
         <summary class="step-header">
           <span class="step-number">4</span>
           <span class="step-title">Policy checks</span>
-          {% if policy_summary.open_count == 0 %}
-            <span class="pill ok" style="margin-left: auto;">All clear</span>
-          {% elif policy_summary.blocking_count > 0 %}
-            <span class="pill bad" style="margin-left: auto;">{{ policy_summary.blocking_count }} blocking</span>
-          {% else %}
-            <span class="pill warn" style="margin-left: auto;">{{ policy_summary.open_count }} to review</span>
-          {% endif %}
+          <span class="pill warn" style="margin-left: auto;">{{ receipt_violations|length }} to review</span>
         </summary>
         <div class="step-body">
-          <div class="policy-summary-row">
-            {% if policy_summary.counts.get('FAIL') %}
-              <span class="pill bad">{{ policy_summary.counts.get('FAIL') }} FAIL</span>
-            {% endif %}
-            {% if policy_summary.counts.get('NEEDS_INFO') %}
-              <span class="pill info">{{ policy_summary.counts.get('NEEDS_INFO') }} NEEDS INFO</span>
-            {% endif %}
-            {% if policy_summary.counts.get('WARN') %}
-              <span class="pill warn">{{ policy_summary.counts.get('WARN') }} WARN</span>
-            {% endif %}
-            {% if policy_summary.open_count == 0 %}
-              <span class="muted" style="font-size:12px;">No issues detected.</span>
-            {% endif %}
-          </div>
-
-          {% if policy_summary.open_count > 0 %}
-            <div class="policy-issues">
-              {% for v in policy_summary.open %}
+          <div class="policy-issues">
+            {% for v in receipt_violations %}
                 <div class="policy-issue">
                   <div class="policy-issue-top">
                     <div class="policy-issue-badges">
@@ -420,7 +404,6 @@
                 </div>
               {% endfor %}
             </div>
-          {% endif %}
 
           {% if open_other_tasks|length > 0 %}
             <div class="policy-subtitle mt-2">Other tasks</div>
@@ -463,6 +446,7 @@
           {% endif %}
         </div>
       </details>
+      {% endif %}
 
     </div>
 
