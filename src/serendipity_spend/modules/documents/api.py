@@ -11,7 +11,11 @@ from serendipity_spend.core.db import db_session
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.service import get_claim_for_user
 from serendipity_spend.modules.documents.schemas import SourceFileOut
-from serendipity_spend.modules.documents.service import create_source_file, list_source_files
+from serendipity_spend.modules.documents.service import (
+    create_source_file,
+    create_source_files_from_upload,
+    list_source_files,
+)
 from serendipity_spend.modules.identity.models import User
 from serendipity_spend.worker.tasks import extract_source_file_task
 
@@ -37,6 +41,31 @@ async def upload_document(
     )
     extract_source_file_task.delay(str(source.id))
     return SourceFileOut.model_validate(source, from_attributes=True)
+
+
+@router.post("/claims/{claim_id}/documents/batch", response_model=list[SourceFileOut])
+async def upload_documents_batch(
+    claim_id: uuid.UUID,
+    uploads: list[UploadFile] = File(...),
+    session: Session = Depends(db_session),
+    user: User = Depends(get_current_user),
+) -> list[SourceFileOut]:
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    out: list[SourceFileOut] = []
+    for upload in uploads:
+        body = await upload.read()
+        sources = create_source_files_from_upload(
+            session,
+            claim=claim,
+            user=user,
+            filename=upload.filename or "upload.bin",
+            content_type=upload.content_type,
+            body=body,
+        )
+        for source in sources:
+            extract_source_file_task.delay(str(source.id))
+            out.append(SourceFileOut.model_validate(source, from_attributes=True))
+    return out
 
 
 @router.get("/claims/{claim_id}/documents", response_model=list[SourceFileOut])

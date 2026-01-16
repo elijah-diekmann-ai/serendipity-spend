@@ -75,3 +75,140 @@ def list_source_files(session: Session, *, claim: Claim, user: User) -> list[Sou
 
 def get_source_file(session: Session, *, source_file_id: uuid.UUID) -> SourceFile | None:
     return session.scalar(select(SourceFile).where(SourceFile.id == source_file_id))
+
+
+def create_source_files_from_upload(
+    session: Session,
+    *,
+    claim: Claim,
+    user: User,
+    filename: str,
+    content_type: str | None,
+    body: bytes,
+) -> list[SourceFile]:
+    if _is_zip_upload(filename=filename, content_type=content_type):
+        children = _unpack_zip_upload(body)
+        sources: list[SourceFile] = []
+        for child in children:
+            sources.extend(
+                create_source_files_from_upload(
+                    session,
+                    claim=claim,
+                    user=user,
+                    filename=child["filename"],
+                    content_type=child.get("content_type"),
+                    body=child["body"],
+                )
+            )
+        return sources
+
+    if _is_eml_upload(filename=filename, content_type=content_type):
+        children = _unpack_eml_upload(body)
+        if not children:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email has no attachments to ingest.",
+            )
+        sources: list[SourceFile] = []
+        for child in children:
+            sources.extend(
+                create_source_files_from_upload(
+                    session,
+                    claim=claim,
+                    user=user,
+                    filename=child["filename"],
+                    content_type=child.get("content_type"),
+                    body=child["body"],
+                )
+            )
+        return sources
+
+    return [
+        create_source_file(
+            session,
+            claim=claim,
+            user=user,
+            filename=_sanitize_filename(filename) or "upload.bin",
+            content_type=content_type,
+            body=body,
+        )
+    ]
+
+
+def _is_zip_upload(*, filename: str, content_type: str | None) -> bool:
+    if filename.lower().endswith(".zip"):
+        return True
+    return (content_type or "").lower() in {
+        "application/zip",
+        "application/x-zip-compressed",
+    }
+
+
+def _is_eml_upload(*, filename: str, content_type: str | None) -> bool:
+    if filename.lower().endswith(".eml"):
+        return True
+    return (content_type or "").lower() in {"message/rfc822"}
+
+
+def _sanitize_filename(name: str) -> str:
+    # Strip any path components and normalize whitespace.
+    name = name.replace("\\", "/").split("/")[-1].strip()
+    return " ".join(name.split())
+
+
+def _unpack_zip_upload(body: bytes) -> list[dict]:
+    import zipfile
+    from io import BytesIO
+
+    max_files = 100
+    max_total_uncompressed = 200 * 1024 * 1024  # 200MB
+
+    out: list[dict] = []
+    total = 0
+
+    with zipfile.ZipFile(BytesIO(body)) as zf:
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        if len(infos) > max_files:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ZIP contains too many files (max {max_files}).",
+            )
+
+        for info in infos:
+            filename = _sanitize_filename(info.filename)
+            if not filename or filename.startswith(".") or filename.startswith("__MACOSX"):
+                continue
+            total += int(info.file_size or 0)
+            if total > max_total_uncompressed:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="ZIP is too large when uncompressed.",
+                )
+            child_body = zf.read(info)
+            out.append({"filename": filename, "content_type": None, "body": child_body})
+
+    return out
+
+
+def _unpack_eml_upload(body: bytes) -> list[dict]:
+    from email import policy
+    from email.parser import BytesParser
+
+    msg = BytesParser(policy=policy.default).parsebytes(body)
+
+    out: list[dict] = []
+    idx = 0
+    for part in msg.iter_attachments():
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        filename = part.get_filename() or f"attachment-{idx}"
+        idx += 1
+        out.append(
+            {
+                "filename": _sanitize_filename(filename) or f"attachment-{idx}",
+                "content_type": part.get_content_type(),
+                "body": payload,
+            }
+        )
+    return out

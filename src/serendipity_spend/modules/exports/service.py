@@ -147,8 +147,29 @@ def _build_reimbursement_xlsx(
 def _build_supporting_zip(*, sources: list[SourceFile]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        used_names: set[str] = set()
         for s in sources:
             body = get_storage().get(key=s.storage_key)
-            filename = s.filename or f"{s.id}.bin"
-            zf.writestr(filename, body)
+            filename = (s.filename or f"{s.id}.bin").replace("\\", "/").split("/")[-1].strip()
+            if not filename:
+                filename = f"{s.id}.bin"
+
+            candidate = filename
+            if candidate in used_names:
+                stem, dot, suffix = candidate.rpartition(".")
+                if not dot:
+                    stem, suffix = candidate, ""
+                suffix = f".{suffix}" if suffix else ""
+                candidate = f"{stem}-{s.id.hex[:8]}{suffix}"
+            counter = 2
+            while candidate in used_names:
+                stem, dot, suffix = filename.rpartition(".")
+                if not dot:
+                    stem, suffix = filename, ""
+                suffix = f".{suffix}" if suffix else ""
+                candidate = f"{stem}-{s.id.hex[:8]}-{counter}{suffix}"
+                counter += 1
+
+            used_names.add(candidate)
+            zf.writestr(candidate, body)
     return buf.getvalue()
