@@ -49,7 +49,9 @@ WEB_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
 router = APIRouter(include_in_schema=False)
-router.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+
+# Static files path for mounting in main.py
+STATIC_DIR = WEB_DIR / "static"
 
 
 def _external_url(request: Request, url: URL) -> str:
