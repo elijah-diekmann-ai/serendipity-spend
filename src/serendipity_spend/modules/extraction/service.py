@@ -889,6 +889,7 @@ def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
         amount=amount,
         currency=currency,
         metadata={
+            "extraction_family": "generic",
             "extraction_method": extraction_method,
             "extraction_confidence": 0.3,
             "employee_reviewed": False,

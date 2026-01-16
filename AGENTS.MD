@@ -28,7 +28,7 @@ problem_statement_verbatim: |-
 docs_and_files:
   product_docs:
     readme: README.md
-    architecture_spec: architecture.MD
+    architecture_overview: README.md
     railway_deploy_guide: railway.MD
     sample_data_notes: Data/sample-data-notes.md
   env_example: .env.example
@@ -54,12 +54,19 @@ docs_and_files:
   database_schema:
     models_import_hook_for_alembic: src/serendipity_spend/models.py
     alembic_env: alembic/env.py
-    initial_migration: alembic/versions/243ff3aab6e1_init.py
+    migrations_dir: alembic/versions
+    migrations:
+      - alembic/versions/243ff3aab6e1_init.py
+      - alembic/versions/f971b58591ce_add_supporting_pdf_export.py
   tests:
     conftest: tests/conftest.py
     e2e_sample_pdf: tests/test_e2e_sample_pdf.py
+    eml_body_ingestion: tests/test_eml_body_ingestion.py
+    exports_merged_pdf_and_xlsx_format: tests/test_exports_merged_pdf_and_xlsx_format.py
     extraction_ocr_fallback: tests/test_extraction_ocr_fallback.py
+    fx_auto_fetch: tests/test_fx_auto_fetch.py
     google_oauth_domain_restriction: tests/test_google_oauth_domain_restriction.py
+    policy_additional_rules: tests/test_policy_additional_rules.py
 
 runtime_stack:
   http:
@@ -96,24 +103,31 @@ domain_model:
     User:
       table: identity_user
       model: src/serendipity_spend/modules/identity/models.py
-      key_fields: [id, email, role, is_active]
+      key_fields: [id, email, full_name, role, is_active]
     Claim:
       table: claims_claim
       model: src/serendipity_spend/modules/claims/models.py
-      key_fields: [id, employee_id, approver_id, home_currency, travel_start_date, travel_end_date, purpose, status]
+      key_fields:
+        [id, employee_id, approver_id, home_currency, travel_start_date, travel_end_date, purpose, status, submitted_at, approved_at, paid_at]
     SourceFile:
       table: documents_source_file
       model: src/serendipity_spend/modules/documents/models.py
-      key_fields: [id, claim_id, uploader_id, filename, sha256, storage_key, status]
+      key_fields:
+        [id, claim_id, uploader_id, filename, content_type, byte_size, sha256, storage_key, status, error_message]
     EvidenceDocument:
       table: documents_evidence_document
       model: src/serendipity_spend/modules/documents/models.py
-      key_fields: [id, source_file_id, page_start, page_end, vendor, receipt_type, text_hash]
+      key_fields:
+        [id, source_file_id, page_start, page_end, vendor, receipt_type, text_hash, classification_confidence]
     ExpenseItem:
       table: expenses_expense_item
       model: src/serendipity_spend/modules/expenses/models.py
       key_fields:
-        [id, claim_id, vendor, vendor_reference, receipt_type, category, description, transaction_date, amount_original_*, amount_home_*, fx_rate_to_home, dedupe_key]
+        [id, claim_id, vendor, vendor_reference, receipt_type, category, description, transaction_date, amount_original_*, amount_home_*, fx_rate_to_home, metadata_json, dedupe_key]
+    ExpenseItemEvidence:
+      table: expenses_expense_item_evidence
+      model: src/serendipity_spend/modules/expenses/models.py
+      key_fields: [expense_item_id, evidence_document_id]
     FxRate:
       table: fx_rate
       model: src/serendipity_spend/modules/fx/models.py
@@ -121,23 +135,26 @@ domain_model:
     PolicyViolation:
       table: policy_violation
       model: src/serendipity_spend/modules/policy/models.py
-      key_fields: [id, claim_id, expense_item_id, rule_id, severity, status, dedupe_key]
+      key_fields:
+        [id, claim_id, expense_item_id, rule_id, rule_version, severity, status, title, message, data_json, dedupe_key, resolved_at]
     Task:
       table: workflow_task
       model: src/serendipity_spend/modules/workflow/models.py
-      key_fields: [id, claim_id, expense_item_id, type, status, assigned_to_user_id]
+      key_fields:
+        [id, claim_id, expense_item_id, type, title, description, status, created_by_user_id, assigned_to_user_id, resolved_at]
     Approval:
       table: workflow_approval
       model: src/serendipity_spend/modules/workflow/models.py
-      key_fields: [id, claim_id, approver_user_id, decision, decided_at]
+      key_fields: [id, claim_id, approver_user_id, decision, comment, decided_at]
     ExportRun:
       table: exports_export_run
       model: src/serendipity_spend/modules/exports/models.py
-      key_fields: [id, claim_id, requested_by_user_id, status, summary_xlsx_key, supporting_pdf_key, supporting_zip_key]
+      key_fields:
+        [id, claim_id, requested_by_user_id, status, error_message, summary_xlsx_key, supporting_pdf_key, supporting_zip_key, completed_at]
     AuditEvent:
       table: audit_event
       model: src/serendipity_spend/modules/audit/models.py
-      key_fields: [id, event_type, claim_id, actor_user_id, occurred_at]
+      key_fields: [id, event_type, claim_id, actor_user_id, payload_json, occurred_at]
 
 claim_state_machine:
   source: src/serendipity_spend/modules/claims/models.py
@@ -161,7 +178,9 @@ claim_state_machine:
       enforced_by: src/serendipity_spend/modules/claims/service.py:update_claim
     submit_claim:
       allowed_from: [DRAFT, NEEDS_EMPLOYEE_REVIEW, CHANGES_REQUESTED]
-      blocks_on_open_FAIL_policy_violations: true
+      blocks_on_open_policy_violations_where:
+        - severity == FAIL
+        - data_json.submit_blocking == true
       to: SUBMITTED or NEEDS_APPROVER_REVIEW if approver_id set
       enforced_by: src/serendipity_spend/modules/claims/service.py:submit_claim
     approve_claim:
@@ -188,11 +207,14 @@ core_contracts:
     rule: ExpenseItem.dedupe_key unique per claim; vendor+vendor_reference unique when reference present
     source: src/serendipity_spend/modules/expenses/models.py
   - id: policy_sync_is_authoritative
-    rule: evaluate_claim recomputes OPEN/RESOLVED PolicyViolation and POLICY_* Task rows from current claim+items
+    rule: evaluate_claim recomputes OPEN/RESOLVED PolicyViolation and POLICY_* Task rows from current claim+items (and auto-resolves stale POLICY_* tasks)
     source: src/serendipity_spend/modules/policy/service.py
   - id: submit_blocks_on_failures
-    rule: open PolicyViolation with severity FAIL prevents submit
+    rule: open PolicyViolation blocks submit when severity == FAIL OR data_json.submit_blocking == true
     source: src/serendipity_spend/modules/claims/service.py
+  - id: extraction_review_tasks
+    rule: extraction creates/updates one EXTRACT_* Task per SourceFile when manual review is needed
+    source: src/serendipity_spend/modules/extraction/service.py
   - id: google_oauth_domain_restriction
     rule: when Google OAuth is enabled, users outside allowed domain are rejected (API + UI)
     source:
@@ -204,7 +226,7 @@ api_contract:
   base_prefix: /api
   auth:
     bearer_jwt:
-      header: Authorization: Bearer <token>
+      header: "Authorization: Bearer <token>"
       jwt:
         alg: HS256
         subject: user.id (uuid string)
@@ -260,6 +282,10 @@ api_contract:
       path: /api/claims/{claim_id}/documents (multipart/form-data)
       auth: bearer
       impl: src/serendipity_spend/modules/documents/api.py:upload_document
+    - method: POST
+      path: /api/claims/{claim_id}/documents/batch (multipart/form-data)
+      auth: bearer
+      impl: src/serendipity_spend/modules/documents/api.py:upload_documents_batch
     - method: GET
       path: /api/claims/{claim_id}/documents
       auth: bearer
@@ -268,6 +294,18 @@ api_contract:
       path: /api/documents/{source_file_id}/download
       auth: bearer
       impl: src/serendipity_spend/modules/documents/api.py:download_document
+    - method: POST
+      path: /api/claims/{claim_id}/items
+      auth: bearer
+      impl: src/serendipity_spend/modules/expenses/api.py:create_item_endpoint
+    - method: PATCH
+      path: /api/claims/{claim_id}/items/{item_id}
+      auth: bearer
+      impl: src/serendipity_spend/modules/expenses/api.py:update_item_endpoint
+    - method: DELETE
+      path: /api/claims/{claim_id}/items/{item_id}
+      auth: bearer
+      impl: src/serendipity_spend/modules/expenses/api.py:delete_item_endpoint
     - method: GET
       path: /api/claims/{claim_id}/items
       auth: bearer
@@ -336,7 +374,10 @@ ui_contract:
     login_pages: [/login, /auth/google/login, /auth/google/callback]
   primary_pages:
     - /app (dashboard)
+    - /app/claims/new (create claim)
     - /app/claims/{claim_id} (claim detail + upload + fx + policy + export + approvals)
+    - /app/tasks (open tasks for current user)
+    - /app/inbox (approver inbox)
   source: src/serendipity_spend/web/ui.py
 
 background_job_contract:
@@ -348,6 +389,7 @@ background_job_contract:
       input: {source_file_id: "<uuid string>"}
       triggers:
         - src/serendipity_spend/modules/documents/api.py:upload_document
+        - src/serendipity_spend/modules/documents/api.py:upload_documents_batch
         - src/serendipity_spend/web/ui.py:upload_document_ui
     - name: generate_export
       task: src/serendipity_spend/worker/tasks.py:generate_export_task
@@ -370,12 +412,17 @@ storage_contract:
 extraction_contract:
   supported_inputs_v1:
     - pdf (filename endswith .pdf OR content_type endswith /pdf)
+    - image (content_type startswith image/ OR filename endswith .png/.jpg/.jpeg/.tif/.tiff/.bmp)
+    - text (content_type text/plain|text/html OR filename endswith .txt/.md/.html/.htm)
+    - zip (unpacked into child SourceFile uploads; see src/serendipity_spend/modules/documents/service.py:create_source_files_from_upload)
+    - eml (email body ingested as text + attachments ingested; see src/serendipity_spend/modules/documents/service.py:create_source_files_from_upload)
   pipeline:
     - read bytes from storage (SourceFile.storage_key)
-    - extract per-page text via pypdf; OCR fallback for pages with empty text
-    - segment bundle into EvidenceDocument records
-    - parse segments into ParsedExpense
+    - choose processor by file type (PDF/image/text) and create EvidenceDocument rows
+    - for PDFs: extract per-page text via pypdf; OCR fallback for empty pages (pytesseract over embedded images)
+    - parse known vendors/receipts; fall back to generic receipt heuristics when possible
     - dedupe and upsert ExpenseItem + link evidence
+    - create/update EXTRACT_* Task when manual review is needed for a SourceFile
     - evaluate policy and advance claim status
   segmentation_rules:
     - grab: page contains ["Your Grab E-Receipt", "Booking ID:"] => 2-page segment
@@ -413,13 +460,50 @@ policy_contract:
     - id: R010
       severity: NEEDS_INFO
       when: ExpenseItem.vendor == Uber AND receipt_type == trip_summary
-      outcome: creates task; does not block submit unless treated as FAIL by future policy
+      outcome: creates task; does not block submit
     - id: R020
       severity: WARN
       when: ExpenseItem.vendor == Grab AND metadata.profile == PERSONAL
     - id: R030
       severity: NEEDS_INFO
       when: item.amount_home_amount is null AND item.amount_original_currency != claim.home_currency
+      outcome: blocks submit (submit_blocking)
+    - id: R040
+      severity: NEEDS_INFO
+      when: item.metadata.extraction_method == generic AND item.metadata.employee_reviewed == false
+      outcome: blocks submit (submit_blocking)
+    - id: R101
+      severity: NEEDS_INFO
+      when: item.category in [lodging, hotel] AND item.metadata.hotel_nights missing/<=0
+      outcome: blocks submit (submit_blocking)
+    - id: R102
+      severity: NEEDS_INFO
+      when: item.category in [lodging, hotel] AND USD conversion missing for nightly cap check
+      outcome: blocks submit (submit_blocking)
+    - id: R103
+      severity: FAIL
+      when: item.category in [lodging, hotel] AND (total_usd / hotel_nights) > 300
+      outcome: blocks submit
+    - id: R111
+      severity: NEEDS_INFO
+      when: item.category in [meals, food, food_and_beverage] AND USD conversion missing for USD 100 threshold
+      outcome: blocks submit (submit_blocking)
+    - id: R112
+      severity: NEEDS_INFO
+      when: item.category in [meals, food, food_and_beverage] AND amount_usd >= 100 AND metadata.attendees missing/blank
+      outcome: blocks submit (submit_blocking)
+    - id: R121
+      severity: NEEDS_INFO
+      when: item.category in [airfare, flight] AND metadata.flight_duration_hours missing/invalid
+      outcome: blocks submit (submit_blocking)
+    - id: R122
+      severity: NEEDS_INFO
+      when: item.category in [airfare, flight] AND metadata.flight_cabin_class missing/blank
+      outcome: blocks submit (submit_blocking)
+    - id: R123
+      severity: FAIL
+      when: item.category in [airfare, flight] AND flight_duration_hours < 6 AND flight_cabin_class != economy
+      outcome: blocks submit
   task_mapping:
     task_type_prefix: POLICY_
     example: R001 => POLICY_R001 (assigned_to_user_id = claim.employee_id)
@@ -434,22 +518,33 @@ export_contract:
       currencies_supported_in_columns: [USD, SGD, CAD, GBP]
       reimbursement_column_currency: claim.home_currency
     supporting_docs_pdf:
-      contents: merged PDF of all SourceFile uploads (PDFs + images converted to PDF pages), ordered by earliest linked ExpenseItem.transaction_date (fallback: upload time)
+      contents: "merged PDF of all SourceFile uploads (PDFs + images + text files converted to PDF pages), ordered by earliest linked ExpenseItem.transaction_date (fallback: upload time)"
+    supporting_docs_zip:
+      notes: supporting_zip_key exists for future use but is not currently produced by src/serendipity_spend/modules/exports/service.py:generate_export
 
 operations:
   env_vars:
     source: src/serendipity_spend/core/config.py (also documented in .env.example and railway.MD)
     required_in_production:
+      - ENVIRONMENT
       - SECRET_KEY
       - DATABASE_URL
       - REDIS_URL (if ENVIRONMENT != dev)
-      - STORAGE_BACKEND + storage credentials (when using worker)
+      - STORAGE_BACKEND + storage credentials (or LOCAL_STORAGE_PATH when using local storage)
     optional:
+      - BASE_URL
       - GOOGLE_OAUTH_CLIENT_ID
       - GOOGLE_OAUTH_CLIENT_SECRET
       - GOOGLE_OAUTH_ALLOWED_DOMAIN
-      - INIT_ADMIN_EMAIL
+      - INIT_ADMIN_EMAIL (comma-separated list supported)
       - INIT_ADMIN_PASSWORD
+      - LOCAL_STORAGE_PATH
+      - S3_ENDPOINT_URL
+      - S3_REGION
+      - S3_BUCKET
+      - S3_ACCESS_KEY_ID
+      - S3_SECRET_ACCESS_KEY
+      - ACCESS_TOKEN_EXP_MINUTES
       - TESSERACT_LANG
   local_dev_commands:
     - python -m pip install -e '.[dev]'

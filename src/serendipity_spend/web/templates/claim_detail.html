@@ -57,6 +57,18 @@
   {% elif submit_ok %}
     <div class="callout success mb-2">Claim submitted.</div>
   {% endif %}
+  {% if route_error %}
+    <div class="callout error mb-2">{{ route_error }}</div>
+  {% elif route_ok %}
+    <div class="callout success mb-2">Claim routed.</div>
+  {% endif %}
+  {% if policy_summary.open_count > 0 %}
+    <div class="callout {% if policy_summary.blocking_count > 0 %}error{% else %}warning{% endif %} mb-2">
+      <strong>Policy checks:</strong>
+      {{ policy_summary.open_count }} open issue(s){% if policy_summary.blocking_count > 0 %} ({{ policy_summary.blocking_count }} blocking submission){% endif %}.
+      <a href="#policy">Review</a>
+    </div>
+  {% endif %}
 
   <!-- Two column layout -->
   <div class="workspace">
@@ -331,11 +343,167 @@
         </div>
       </div>
 
+      <!-- Step 4: Policy checks -->
+      <details class="step-card" id="policy" {% if policy_summary.open_count > 0 %}open{% endif %}>
+        <summary class="step-header">
+          <span class="step-number">4</span>
+          <span class="step-title">Policy checks</span>
+          {% if policy_summary.open_count == 0 %}
+            <span class="pill ok" style="margin-left: auto;">All clear</span>
+          {% elif policy_summary.blocking_count > 0 %}
+            <span class="pill bad" style="margin-left: auto;">{{ policy_summary.blocking_count }} blocking</span>
+          {% else %}
+            <span class="pill warn" style="margin-left: auto;">{{ policy_summary.open_count }} to review</span>
+          {% endif %}
+        </summary>
+        <div class="step-body">
+          <div class="policy-summary-row">
+            {% if policy_summary.counts.get('FAIL') %}
+              <span class="pill bad">{{ policy_summary.counts.get('FAIL') }} FAIL</span>
+            {% endif %}
+            {% if policy_summary.counts.get('NEEDS_INFO') %}
+              <span class="pill info">{{ policy_summary.counts.get('NEEDS_INFO') }} NEEDS INFO</span>
+            {% endif %}
+            {% if policy_summary.counts.get('WARN') %}
+              <span class="pill warn">{{ policy_summary.counts.get('WARN') }} WARN</span>
+            {% endif %}
+            {% if policy_summary.open_count == 0 %}
+              <span class="muted" style="font-size:12px;">No issues detected.</span>
+            {% endif %}
+          </div>
+
+          {% if policy_summary.open_count > 0 %}
+            <div class="policy-issues">
+              {% for v in policy_summary.open %}
+                <div class="policy-issue">
+                  <div class="policy-issue-top">
+                    <div class="policy-issue-badges">
+                      {% if v.severity.value == 'FAIL' %}
+                        <span class="pill bad">FAIL</span>
+                      {% elif v.severity.value == 'WARN' %}
+                        <span class="pill warn">WARN</span>
+                      {% elif v.severity.value == 'NEEDS_INFO' %}
+                        <span class="pill info">NEEDS INFO</span>
+                      {% else %}
+                        <span class="pill">{{ v.severity.value.replace('_',' ') }}</span>
+                      {% endif %}
+                      {% if v.severity.value != 'FAIL' and (v.data_json or {}).get('submit_blocking') %}
+                        <span class="pill bad">Blocks submit</span>
+                      {% endif %}
+                      <span class="pill">{{ v.rule_id }}</span>
+                    </div>
+                    <div class="policy-issue-actions">
+                      {% if v.expense_item_id %}
+                        <a href="/app/claims/{{ claim.id }}?edit_item_id={{ v.expense_item_id }}#edit-item" class="link-muted">Edit item</a>
+                      {% endif %}
+                      {% set t = policy_tasks_by_key.get(v.dedupe_key) %}
+                      {% if t and t.status.value == 'OPEN' and (user.role.value == 'ADMIN' or user.id == claim.employee_id) %}
+                        <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="display:inline;">
+                          <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                          <button class="btn btn-xs" type="submit">Mark done</button>
+                        </form>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="policy-issue-title">{{ v.title }}</div>
+                  <div class="muted">{{ v.message }}</div>
+                  {% if v.expense_item_id %}
+                    {% set item = items_by_id.get(v.expense_item_id) %}
+                    <div class="policy-issue-item mono muted">
+                      {% if item %}
+                        {{ item.vendor }} · {{ item.amount_original_currency }} {{ '%.2f'|format(item.amount_original_amount) }} · {{ item.transaction_date or '—' }}
+                      {% else %}
+                        Item {{ v.expense_item_id|string|truncate(8, True, '') }}
+                      {% endif %}
+                    </div>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          {% if open_other_tasks|length > 0 %}
+            <div class="policy-subtitle mt-2">Other tasks</div>
+            <div class="task-list">
+              {% for t in open_other_tasks %}
+                <div class="task-item">
+                  <div>
+                    <div>{{ t.title }}</div>
+                    {% if t.description %}<div class="muted" style="font-size:12px;">{{ t.description }}</div>{% endif %}
+                  </div>
+                  {% if user.role.value == 'ADMIN' or user.id == claim.employee_id %}
+                    <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="margin:0;">
+                      <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                      <button class="btn btn-xs" type="submit">Mark done</button>
+                    </form>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          {% if policy_summary.resolved|length > 0 %}
+            <details class="mt-2">
+              <summary class="muted">Resolved policy issues ({{ policy_summary.resolved|length }})</summary>
+              <div class="policy-issues mt-1">
+                {% for v in policy_summary.resolved %}
+                  <div class="policy-issue policy-issue--resolved">
+                    <div class="policy-issue-top">
+                      <div class="policy-issue-badges">
+                        <span class="pill ok">RESOLVED</span>
+                        <span class="pill">{{ v.rule_id }}</span>
+                      </div>
+                    </div>
+                    <div class="policy-issue-title">{{ v.title }}</div>
+                    <div class="muted">{{ v.message }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            </details>
+          {% endif %}
+        </div>
+      </details>
+
     </div>
 
     <!-- Sidebar -->
     <aside class="workspace-sidebar">
 
+      <!-- Routing -->
+      {% if user.role.value == 'ADMIN' %}
+      <div class="sidebar-card">
+        <h3 class="sidebar-label">Routing</h3>
+        <div class="muted" style="font-size:12px; margin-bottom:10px;">
+          Approver:
+          {% if claim.approver and claim.approver.email %}
+            {{ claim.approver.email }}
+          {% elif claim.approver_id %}
+            {{ claim.approver_id }}
+          {% else %}
+            —
+          {% endif %}
+        </div>
+        <form method="post" action="/app/claims/{{ claim.id }}/route" class="compact-form">
+          <div class="form-field">
+            <label>Assign to</label>
+            <select name="approver_id" required>
+              <option value="" disabled {% if not claim.approver_id %}selected{% endif %}>Select approver…</option>
+              {% for a in route_targets %}
+                <option value="{{ a.id }}" {% if claim.approver_id == a.id %}selected{% endif %}>
+                  {{ a.email }}{% if a.role.value == 'ADMIN' %} (ADMIN){% endif %}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+          <button class="btn btn-sm" type="submit" style="width:100%;">
+            {% if claim.status.value == 'SUBMITTED' %}Route to approver{% else %}Update approver{% endif %}
+          </button>
+        </form>
+        {% if claim.status.value == 'SUBMITTED' and not claim.approver_id %}
+          <div class="callout warning mt-1">Submitted but not routed to an approver yet.</div>
+        {% endif %}
+      </div>
+      {% endif %}
 
       <!-- FX Rates -->
       <div class="sidebar-card">
@@ -435,6 +603,17 @@ details.step-card > .step-header { list-style:none; }
 
 .edit-panel { background:var(--accent-bg); border:1px solid var(--accent-border); border-radius:var(--radius-sm); padding:16px; }
 .edit-panel-header { display:flex; justify-content:space-between; margin-bottom:12px; }
+
+.policy-summary-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.policy-issues { display:flex; flex-direction:column; gap:10px; margin-top:12px; }
+.policy-issue { background:var(--bg-elevated); border:1px solid var(--border-subtle); border-radius:var(--radius-sm); padding:12px 14px; }
+.policy-issue--resolved { opacity:0.8; }
+.policy-issue-top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+.policy-issue-badges { display:flex; gap:6px; flex-wrap:wrap; }
+.policy-issue-actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+.policy-issue-title { font-weight:600; color:var(--text-primary); margin-top:8px; }
+.policy-issue-item { margin-top:8px; }
+.policy-subtitle { font-size:11px; font-weight:600; letter-spacing:0.05em; text-transform:uppercase; color:var(--text-muted); margin-top:16px; }
 
 .task-list { display:flex; flex-direction:column; gap:8px; }
 .task-item { display:flex; justify-content:space-between; align-items:center; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border-subtle); }

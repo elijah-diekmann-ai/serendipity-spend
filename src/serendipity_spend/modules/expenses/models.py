@@ -23,7 +23,12 @@ from serendipity_spend.core.models import Base, Timestamped, UUIDPrimaryKey
 class ExpenseItem(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "expenses_expense_item"
     __table_args__ = (
-        UniqueConstraint("vendor", "vendor_reference", name="uq_expense_vendor_reference"),
+        UniqueConstraint(
+            "claim_id",
+            "vendor",
+            "vendor_reference",
+            name="uq_expense_claim_vendor_reference",
+        ),
         UniqueConstraint("claim_id", "dedupe_key", name="uq_expense_claim_dedupe"),
     )
 
