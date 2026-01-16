@@ -126,6 +126,7 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
     from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
     from serendipity_spend.modules.exports.models import ExportRun
     from serendipity_spend.modules.fx.models import FxRate
+    from serendipity_spend.modules.policy.models import PolicyException
     from serendipity_spend.modules.workflow.models import Approval, Task
 
     # Get expense item IDs for evidence cleanup
@@ -144,12 +145,15 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
     if source_ids:
         session.execute(EvidenceDocument.__table__.delete().where(EvidenceDocument.source_file_id.in_(source_ids)))
 
-    # Delete related records
+    # Delete policy-related records BEFORE expense items (FK constraint)
+    session.execute(PolicyException.__table__.delete().where(PolicyException.claim_id == claim.id))
+    session.execute(PolicyViolation.__table__.delete().where(PolicyViolation.claim_id == claim.id))
+    session.execute(Task.__table__.delete().where(Task.claim_id == claim.id))
+
+    # Delete remaining related records
     session.execute(ExpenseItem.__table__.delete().where(ExpenseItem.claim_id == claim.id))
     session.execute(SourceFile.__table__.delete().where(SourceFile.claim_id == claim.id))
     session.execute(FxRate.__table__.delete().where(FxRate.claim_id == claim.id))
-    session.execute(PolicyViolation.__table__.delete().where(PolicyViolation.claim_id == claim.id))
-    session.execute(Task.__table__.delete().where(Task.claim_id == claim.id))
     session.execute(Approval.__table__.delete().where(Approval.claim_id == claim.id))
     session.execute(ExportRun.__table__.delete().where(ExportRun.claim_id == claim.id))
     session.execute(AuditEvent.__table__.delete().where(AuditEvent.claim_id == claim.id))
