@@ -83,6 +83,8 @@ def update_claim(session: Session, *, claim: Claim, user: User, **changes) -> Cl
 
 def route_claim(session: Session, *, claim: Claim, approver_id: uuid.UUID) -> Claim:
     claim.approver_id = approver_id
+    if claim.status == ClaimStatus.SUBMITTED:
+        claim.status = ClaimStatus.NEEDS_APPROVER_REVIEW
     session.add(claim)
     session.commit()
     session.refresh(claim)

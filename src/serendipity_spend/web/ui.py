@@ -50,7 +50,7 @@ from serendipity_spend.modules.identity.models import User
 from serendipity_spend.modules.identity.service import authenticate_user, get_or_create_google_user
 from serendipity_spend.modules.policy.models import PolicyViolation
 from serendipity_spend.modules.policy.service import evaluate_claim
-from serendipity_spend.modules.workflow.models import ApprovalDecision
+from serendipity_spend.modules.workflow.models import ApprovalDecision, Task, TaskStatus
 from serendipity_spend.modules.workflow.service import approve_claim, list_tasks, resolve_task
 from serendipity_spend.worker.tasks import extract_source_file_task, generate_export_task
 
@@ -279,14 +279,81 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
     )
 
 
-@router.post("/app/claims/new", response_class=RedirectResponse)
-def create_claim_ui(request: Request, session: Session = Depends(db_session)) -> RedirectResponse:
+@router.get("/app/claims/new", response_class=HTMLResponse)
+def new_claim_page(request: Request, session: Session = Depends(db_session)) -> HTMLResponse:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
-    claim = create_claim(session, employee_id=user.id, home_currency="SGD")
+    return templates.TemplateResponse(
+        "new_claim.html",
+        {
+            "request": request,
+            "user": user,
+            "currency_options": ["SGD", "USD", "CAD", "GBP", "EUR"],
+            "default_home_currency": "SGD",
+        },
+    )
+
+
+@router.post("/app/claims/new", response_class=RedirectResponse)
+def create_claim_ui(
+    request: Request,
+    home_currency: str = Form("SGD"),
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    claim = create_claim(session, employee_id=user.id, home_currency=(home_currency or "SGD"))
     evaluate_claim(session, claim_id=claim.id)
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+
+
+@router.get("/app/tasks", response_class=HTMLResponse)
+def tasks_page(request: Request, session: Session = Depends(db_session)) -> HTMLResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    tasks = list(
+        session.scalars(
+            select(Task)
+            .where(Task.assigned_to_user_id == user.id, Task.status == TaskStatus.OPEN)
+            .order_by(Task.created_at.desc())
+        )
+    )
+    return templates.TemplateResponse(
+        "tasks.html",
+        {"request": request, "user": user, "tasks": tasks},
+    )
+
+
+@router.get("/app/inbox", response_class=HTMLResponse)
+def inbox_page(request: Request, session: Session = Depends(db_session)) -> HTMLResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role.value not in {"APPROVER", "ADMIN"}:
+        return RedirectResponse(url="/app", status_code=303)
+
+    from sqlalchemy.orm import selectinload
+
+    from serendipity_spend.modules.claims.models import Claim, ClaimStatus
+
+    q = (
+        select(Claim)
+        .options(selectinload(Claim.employee))
+        .where(Claim.status == ClaimStatus.NEEDS_APPROVER_REVIEW)
+        .order_by(Claim.created_at.desc())
+    )
+    if user.role.value == "APPROVER":
+        q = q.where(Claim.approver_id == user.id)
+
+    claims = list(session.scalars(q))
+    return templates.TemplateResponse(
+        "inbox.html",
+        {"request": request, "user": user, "claims": claims},
+    )
 
 
 @router.get("/app/claims/{claim_id}", response_class=HTMLResponse)

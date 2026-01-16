@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="page-header">
+    <div class="page-header-content">
+      <div>
+        <h1 class="page-title">Approvals inbox</h1>
+        <p class="text-secondary mt-1">Claims that are ready for approver review.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card dashboard-card dashboard-card--violet">
+    <div class="card-body">
+      {% if claims|length == 0 %}
+        <div class="empty-state">
+          <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M3 3h18v4H3z"></path>
+            <path d="M3 7h18v14H3z"></path>
+            <path d="M7 11h10"></path>
+            <path d="M7 15h10"></path>
+          </svg>
+          <p>No claims waiting for approval.</p>
+        </div>
+      {% else %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Claim</th>
+              <th>Employee</th>
+              <th>Purpose</th>
+              <th>Submitted</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in claims %}
+              <tr>
+                <td class="mono muted">
+                  <a href="/app/claims/{{ c.id }}">#{{ c.id|string|truncate(8, True, '') }}</a>
+                </td>
+                <td class="muted">
+                  {% if c.employee and c.employee.email %}
+                    {{ c.employee.email }}
+                  {% else %}
+                    {{ c.employee_id }}
+                  {% endif %}
+                </td>
+                <td class="muted">{{ c.purpose or "—" }}</td>
+                <td class="muted">{{ c.submitted_at or "—" }}</td>
+                <td class="text-right">
+                  <a class="btn btn-sm" href="/app/claims/{{ c.id }}">Review</a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
+

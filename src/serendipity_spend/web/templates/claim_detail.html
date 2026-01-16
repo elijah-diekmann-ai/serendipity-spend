@@ -38,9 +38,15 @@
           <button class="btn" type="submit">Route to me</button>
         </form>
       {% endif %}
-      {% if claim.status.value == 'DRAFT' %}
+      {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
         <form method="post" action="/app/claims/{{ claim.id }}/submit">
-          <button class="btn btn-accent" type="submit">Submit for Review</button>
+          <button class="btn btn-accent" type="submit">
+            {% if claim.status.value == 'CHANGES_REQUESTED' %}
+              Resubmit for Review
+            {% else %}
+              Submit for Review
+            {% endif %}
+          </button>
         </form>
       {% endif %}
       <form method="post" action="/app/claims/{{ claim.id }}/export">
