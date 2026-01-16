@@ -1,5 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
+  <!-- Breadcrumb -->
+  <div class="breadcrumb">
+    <a href="/app" class="breadcrumb-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="15 18 9 12 15 6"></polyline>
+      </svg>
+      Back to Claims
+    </a>
+  </div>
+
   <!-- Header -->
   <div class="claim-header">
     <div class="claim-header-main">
@@ -28,9 +38,11 @@
           <button class="btn" type="submit">Route to me</button>
         </form>
       {% endif %}
-      <form method="post" action="/app/claims/{{ claim.id }}/submit">
-        <button class="btn btn-accent" type="submit">Submit for Review</button>
-      </form>
+      {% if claim.status.value == 'DRAFT' %}
+        <form method="post" action="/app/claims/{{ claim.id }}/submit">
+          <button class="btn btn-accent" type="submit">Submit for Review</button>
+        </form>
+      {% endif %}
       <form method="post" action="/app/claims/{{ claim.id }}/export">
         <button class="btn" type="submit">Export</button>
       </form>
@@ -43,6 +55,11 @@
         </form>
         <form method="post" action="/app/claims/{{ claim.id }}/reject">
           <button class="btn btn-danger" type="submit">Reject</button>
+        </form>
+      {% endif %}
+      {% if claim.status.value == 'DRAFT' %}
+        <form method="post" action="/app/claims/{{ claim.id }}/delete" onsubmit="return confirm('Delete this claim? This cannot be undone.');">
+          <button class="btn btn-danger" type="submit">Delete</button>
         </form>
       {% endif %}
     </div>
@@ -146,6 +163,180 @@
       <!-- Expense Items Section -->
       <section class="section">
         <h2 class="section-label">Expense Items</h2>
+        <div class="callout mt-1">
+          Add missing items manually when a receipt isn't recognized.
+        </div>
+
+        <form method="post" action="/app/claims/{{ claim.id }}/items/new" class="details-form mt-1">
+          <div class="form-row">
+            <div class="form-field">
+              <label>Vendor</label>
+              <input name="vendor" placeholder="e.g. Marriott, Delta, Restaurant" required />
+            </div>
+            <div class="form-field">
+              <label>Date</label>
+              <input type="date" name="transaction_date" />
+            </div>
+          </div>
+          <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr;">
+            <div class="form-field">
+              <label>Category</label>
+              <select name="category">
+                <option value="">—</option>
+                {% for c in expense_categories %}
+                  <option value="{{ c }}">{{ c }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="form-field">
+              <label>Amount</label>
+              <input name="amount_original_amount" placeholder="e.g. 123.45" required />
+            </div>
+            <div class="form-field">
+              <label>Currency</label>
+              <select name="amount_original_currency" required>
+                {% for cur in currency_options %}
+                  <option value="{{ cur }}" {% if cur == claim.home_currency %}selected{% endif %}>{{ cur }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="form-field">
+            <label>Description</label>
+            <input name="description" placeholder="Optional notes (e.g., dinner with client)" />
+          </div>
+
+          <details class="mt-1">
+            <summary class="muted">Policy details (optional)</summary>
+            <div class="form-row mt-1" style="grid-template-columns: 1fr 1fr;">
+              <div class="form-field">
+                <label>Hotel nights</label>
+                <input name="hotel_nights" placeholder="e.g. 2" />
+              </div>
+              <div class="form-field">
+                <label>Meal attendees (if applicable)</label>
+                <input name="attendees" placeholder="Names or count" />
+              </div>
+            </div>
+            <div class="form-row" style="grid-template-columns: 1fr 1fr;">
+              <div class="form-field">
+                <label>Flight duration (hours)</label>
+                <input name="flight_duration_hours" placeholder="e.g. 5.5" />
+              </div>
+              <div class="form-field">
+                <label>Flight cabin class</label>
+                <select name="flight_cabin_class">
+                  <option value="">—</option>
+                  <option value="economy">economy</option>
+                  <option value="premium_economy">premium_economy</option>
+                  <option value="business">business</option>
+                  <option value="first">first</option>
+                </select>
+              </div>
+            </div>
+          </details>
+
+          <div class="mt-1">
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input type="checkbox" name="employee_reviewed" checked />
+              Mark reviewed
+            </label>
+          </div>
+
+          <button class="btn btn-sm mt-1" type="submit">Add item</button>
+        </form>
+
+        {% if edit_item %}
+          <div id="edit-item" class="callout mt-2">
+            Editing item: <span class="mono">{{ edit_item.id }}</span>
+            <a href="/app/claims/{{ claim.id }}" class="muted" style="margin-left: 10px;">Cancel</a>
+          </div>
+          <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/update" class="details-form mt-1">
+            <div class="form-row">
+              <div class="form-field">
+                <label>Vendor</label>
+                <input name="vendor" value="{{ edit_item.vendor }}" required />
+              </div>
+              <div class="form-field">
+                <label>Date</label>
+                <input type="date" name="transaction_date" value="{{ edit_item.transaction_date or '' }}" />
+              </div>
+            </div>
+            <div class="form-row" style="grid-template-columns: 1fr 1fr 1fr;">
+              <div class="form-field">
+                <label>Category</label>
+                <select name="category">
+                  <option value="">—</option>
+                  {% for c in expense_categories %}
+                    <option value="{{ c }}" {% if edit_item.category == c %}selected{% endif %}>{{ c }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="form-field">
+                <label>Amount</label>
+                <input name="amount_original_amount" value="{{ '%.2f'|format(edit_item.amount_original_amount) }}" required />
+              </div>
+              <div class="form-field">
+                <label>Currency</label>
+                <select name="amount_original_currency" required>
+                  {% for cur in currency_options %}
+                    <option value="{{ cur }}" {% if cur == edit_item.amount_original_currency %}selected{% endif %}>{{ cur }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+            </div>
+            <div class="form-field">
+              <label>Description</label>
+              <input name="description" value="{{ edit_item.description or '' }}" />
+            </div>
+
+            <details class="mt-1" open>
+              <summary class="muted">Policy details</summary>
+              <div class="form-row mt-1" style="grid-template-columns: 1fr 1fr;">
+                <div class="form-field">
+                  <label>Hotel nights</label>
+                  <input name="hotel_nights" value="{{ edit_item.metadata_json.get('hotel_nights', '') }}" />
+                </div>
+                <div class="form-field">
+                  <label>Meal attendees</label>
+                  <input name="attendees" value="{{ edit_item.metadata_json.get('attendees', '') }}" />
+                </div>
+              </div>
+              <div class="form-row" style="grid-template-columns: 1fr 1fr;">
+                <div class="form-field">
+                  <label>Flight duration (hours)</label>
+                  <input name="flight_duration_hours" value="{{ edit_item.metadata_json.get('flight_duration_hours', '') }}" />
+                </div>
+                <div class="form-field">
+                  <label>Flight cabin class</label>
+                  <select name="flight_cabin_class">
+                    <option value="">—</option>
+                    {% set cabin = edit_item.metadata_json.get('flight_cabin_class', '') %}
+                    <option value="economy" {% if cabin == 'economy' %}selected{% endif %}>economy</option>
+                    <option value="premium_economy" {% if cabin == 'premium_economy' %}selected{% endif %}>premium_economy</option>
+                    <option value="business" {% if cabin == 'business' %}selected{% endif %}>business</option>
+                    <option value="first" {% if cabin == 'first' %}selected{% endif %}>first</option>
+                  </select>
+                </div>
+              </div>
+            </details>
+
+            <div class="mt-1">
+              <label style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" name="employee_reviewed" {% if edit_item.metadata_json.get('employee_reviewed') %}checked{% endif %} />
+                Mark reviewed
+              </label>
+            </div>
+
+            <div class="btn-row mt-1">
+              <button class="btn btn-sm btn-primary" type="submit">Save item</button>
+            </div>
+          </form>
+          <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/delete" onsubmit="return confirm('Delete this item?');" class="mt-1">
+            <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+          </form>
+        {% endif %}
+
         {% if items|length == 0 %}
           <p class="empty-text">No items yet. Upload receipts to extract expenses.</p>
         {% else %}
@@ -156,6 +347,7 @@
               <span>Description</span>
               <span class="text-right">Amount</span>
               <span class="text-right">{{ claim.home_currency }}</span>
+              <span class="text-right">Edit</span>
             </div>
             {% for i in items %}
               <div class="expense-row">
@@ -169,6 +361,9 @@
                   {% else %}
                     <span class="muted">—</span>
                   {% endif %}
+                </span>
+                <span class="text-right">
+                  <a class="btn btn-sm" href="/app/claims/{{ claim.id }}?edit_item_id={{ i.id }}#edit-item">Edit</a>
                 </span>
               </div>
             {% endfor %}
@@ -190,7 +385,12 @@
           <div class="task-list">
             {% for t in tasks %}
               <div class="task-item {% if t.status.value == 'RESOLVED' %}task-item--done{% endif %}">
-                <span class="task-title">{{ t.title }}</span>
+                <div style="flex:1;">
+                  <span class="task-title">{{ t.title }}</span>
+                  {% if t.description %}
+                    <div class="muted" style="margin-top: 2px;">{{ t.description }}</div>
+                  {% endif %}
+                </div>
                 {% if t.status.value == 'OPEN' %}
                   <form method="post" action="/app/tasks/{{ t.id }}/resolve">
                     <input type="hidden" name="claim_id" value="{{ claim.id }}" />
@@ -216,6 +416,14 @@
           <div class="form-field">
             <label>CAD → {{ claim.home_currency }}</label>
             <input name="cad_to_home" placeholder="e.g. 1.00" />
+          </div>
+          <div class="form-field">
+            <label>GBP → {{ claim.home_currency }}</label>
+            <input name="gbp_to_home" placeholder="e.g. 1.70" />
+          </div>
+          <div class="form-field">
+            <label>EUR → {{ claim.home_currency }}</label>
+            <input name="eur_to_home" placeholder="e.g. 1.45" />
           </div>
           <button class="btn btn-sm" type="submit">Save</button>
         </form>
@@ -253,6 +461,26 @@
 
 <style>
 /* Claim Detail Workspace Styles */
+.breadcrumb {
+  margin-bottom: 20px;
+}
+
+.breadcrumb-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.breadcrumb-link:hover {
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
 .claim-header {
   display: flex;
   align-items: flex-start;
@@ -422,7 +650,7 @@
 .expenses-header,
 .expense-row {
   display: grid;
-  grid-template-columns: 90px 120px 1fr 100px 80px;
+  grid-template-columns: 90px 120px 1fr 100px 80px 70px;
   gap: 12px;
   padding: 12px 16px;
   align-items: center;

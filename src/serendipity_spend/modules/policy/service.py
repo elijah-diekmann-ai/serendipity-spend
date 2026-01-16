@@ -3,12 +3,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from serendipity_spend.modules.claims.models import Claim
 from serendipity_spend.modules.expenses.models import ExpenseItem
+from serendipity_spend.modules.fx.models import FxRate
 from serendipity_spend.modules.policy.models import PolicySeverity, PolicyViolation, ViolationStatus
 from serendipity_spend.modules.workflow.models import Task, TaskStatus
 
@@ -61,6 +63,20 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 data={},
             )
         )
+
+    usd_to_home: Decimal | None = None
+    if claim.home_currency.upper() == "USD":
+        usd_to_home = Decimal("1")
+    else:
+        fx = session.scalar(
+            select(FxRate).where(
+                FxRate.claim_id == claim.id,
+                FxRate.from_currency == "USD",
+                FxRate.to_currency == claim.home_currency.upper(),
+            )
+        )
+        if fx:
+            usd_to_home = fx.rate
 
     for item in items:
         if item.vendor == "Uber" and item.receipt_type == "trip_summary":
@@ -120,8 +136,194 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 )
             )
 
+        # R040: generic extraction requires employee confirmation
+        if (
+            str(item.metadata_json.get("extraction_method")) == "generic"
+            and not bool(item.metadata_json.get("employee_reviewed"))
+        ):
+            issues.append(
+                Issue(
+                    dedupe_key=f"item:{item.id}:R040",
+                    claim_id=claim.id,
+                    expense_item_id=item.id,
+                    rule_id="R040",
+                    severity=PolicySeverity.NEEDS_INFO,
+                    title="Confirm auto-extracted receipt details",
+                    message=(
+                        "This receipt was parsed using a generic heuristic. "
+                        "Review the vendor/date/amount and mark it reviewed."
+                    ),
+                    data={"extraction_method": "generic"},
+                )
+            )
+
+        # R101/R102: hotel nightly cap (USD 300/night)
+        if str(item.category or "").lower() in {"lodging", "hotel"}:
+            nights = item.metadata_json.get("hotel_nights")
+            try:
+                nights_int = int(nights)
+            except Exception:
+                nights_int = 0
+
+            if nights_int <= 0:
+                issues.append(
+                    Issue(
+                        dedupe_key=f"item:{item.id}:R101",
+                        claim_id=claim.id,
+                        expense_item_id=item.id,
+                        rule_id="R101",
+                        severity=PolicySeverity.NEEDS_INFO,
+                        title="Hotel nights required",
+                        message="Enter the number of hotel nights to check the nightly cap.",
+                        data={},
+                    )
+                )
+            else:
+                per_night_usd = _amount_usd(item=item, claim=claim, usd_to_home=usd_to_home)
+                if per_night_usd is None:
+                    issues.append(
+                        Issue(
+                            dedupe_key=f"item:{item.id}:R102",
+                            claim_id=claim.id,
+                            expense_item_id=item.id,
+                            rule_id="R102",
+                            severity=PolicySeverity.NEEDS_INFO,
+                            title="USD conversion needed for hotel cap",
+                            message=(
+                                "Set FX rates so the system can convert this hotel total to USD "
+                                "and check the USD 300/night cap."
+                            ),
+                            data={},
+                        )
+                    )
+                else:
+                    nightly = (per_night_usd / Decimal(nights_int)).quantize(Decimal("0.01"))
+                    if nightly > Decimal("300.00"):
+                        issues.append(
+                            Issue(
+                                dedupe_key=f"item:{item.id}:R103",
+                                claim_id=claim.id,
+                                expense_item_id=item.id,
+                                rule_id="R103",
+                                severity=PolicySeverity.FAIL,
+                                title="Hotel nightly rate exceeds USD 300",
+                                message=(
+                                    f"Nightly rate is approx USD {nightly} (cap is USD 300). "
+                                    "Provide justification or adjust the claim."
+                                ),
+                                data={"nightly_usd": str(nightly), "cap_usd": "300.00"},
+                            )
+                        )
+
+        # R111: meals over USD 100 require attendees
+        if str(item.category or "").lower() in {"meals", "food", "food_and_beverage"}:
+            amount_usd = _amount_usd(item=item, claim=claim, usd_to_home=usd_to_home)
+            if amount_usd is None:
+                issues.append(
+                    Issue(
+                        dedupe_key=f"item:{item.id}:R111",
+                        claim_id=claim.id,
+                        expense_item_id=item.id,
+                        rule_id="R111",
+                        severity=PolicySeverity.NEEDS_INFO,
+                        title="USD conversion needed for meal threshold",
+                        message=(
+                            "Set FX rates so the system can determine whether this meal exceeds "
+                            "USD 100 and requires attendee names."
+                        ),
+                        data={},
+                    )
+                )
+            elif amount_usd >= Decimal("100.00"):
+                attendees = str(item.metadata_json.get("attendees") or "").strip()
+                if not attendees:
+                    issues.append(
+                        Issue(
+                            dedupe_key=f"item:{item.id}:R112",
+                            claim_id=claim.id,
+                            expense_item_id=item.id,
+                            rule_id="R112",
+                            severity=PolicySeverity.NEEDS_INFO,
+                            title="Meal attendees required (USD 100+)",
+                            message="Enter attendee names (or a count) for meals over USD 100.",
+                            data={"threshold_usd": "100.00"},
+                        )
+                    )
+
+        # R121/R122/R123: flights under 6 hours must be economy
+        if str(item.category or "").lower() in {"airfare", "flight"}:
+            duration = item.metadata_json.get("flight_duration_hours")
+            cabin = str(item.metadata_json.get("flight_cabin_class") or "").strip().lower()
+            try:
+                duration_hours = Decimal(str(duration))
+            except Exception:
+                duration_hours = None
+
+            if duration_hours is None:
+                issues.append(
+                    Issue(
+                        dedupe_key=f"item:{item.id}:R121",
+                        claim_id=claim.id,
+                        expense_item_id=item.id,
+                        rule_id="R121",
+                        severity=PolicySeverity.NEEDS_INFO,
+                        title="Flight duration required",
+                        message="Enter the flight duration in hours to check cabin class rules.",
+                        data={},
+                    )
+                )
+            if not cabin:
+                issues.append(
+                    Issue(
+                        dedupe_key=f"item:{item.id}:R122",
+                        claim_id=claim.id,
+                        expense_item_id=item.id,
+                        rule_id="R122",
+                        severity=PolicySeverity.NEEDS_INFO,
+                        title="Flight cabin class required",
+                        message="Select the booked cabin class (economy, business, etc.).",
+                        data={},
+                    )
+                )
+            if duration_hours is not None and cabin and duration_hours < Decimal("6"):
+                if cabin != "economy":
+                    issues.append(
+                        Issue(
+                            dedupe_key=f"item:{item.id}:R123",
+                            claim_id=claim.id,
+                            expense_item_id=item.id,
+                            rule_id="R123",
+                            severity=PolicySeverity.FAIL,
+                            title="Short flight must be economy",
+                            message=(
+                                "Flights under 6 hours must be booked in economy class. "
+                                "Provide justification or adjust the claim."
+                            ),
+                            data={"duration_hours": str(duration_hours), "cabin": cabin},
+                        )
+                    )
+
     _sync_violations(session=session, claim_id=claim.id, issues=issues)
     _sync_tasks(session=session, claim=claim, issues=issues)
+
+
+def _amount_usd(*, item: ExpenseItem, claim: Claim, usd_to_home: Decimal | None) -> Decimal | None:
+    cur = item.amount_original_currency.upper()
+    if cur == "USD":
+        return item.amount_original_amount
+
+    # If claim is in USD, we can rely on home amount.
+    if claim.home_currency.upper() == "USD":
+        return item.amount_home_amount
+
+    # Otherwise, convert home->USD if we have USD->home.
+    if item.amount_home_amount is None or usd_to_home in {None, Decimal("0")}:
+        return None
+
+    try:
+        return (item.amount_home_amount / usd_to_home).quantize(Decimal("0.01"))
+    except Exception:
+        return None
 
 
 def _sync_violations(*, session: Session, claim_id: uuid.UUID, issues: list[Issue]) -> None:

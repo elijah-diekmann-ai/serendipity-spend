@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import secrets
 import uuid
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.schemas import ClaimUpdate
 from serendipity_spend.modules.claims.service import (
     create_claim,
+    delete_claim,
     get_claim_for_user,
     list_claims_for_user,
     route_claim,
@@ -27,11 +28,15 @@ from serendipity_spend.modules.claims.service import (
 )
 from serendipity_spend.modules.documents.models import SourceFile
 from serendipity_spend.modules.documents.service import (
-    create_source_file,
     create_source_files_from_upload,
     list_source_files,
 )
-from serendipity_spend.modules.expenses.service import list_items
+from serendipity_spend.modules.expenses.service import (
+    create_manual_item,
+    delete_expense_item,
+    list_items,
+    update_expense_item,
+)
 from serendipity_spend.modules.exports.models import ExportRun
 from serendipity_spend.modules.exports.service import create_export_run
 from serendipity_spend.modules.fx.service import apply_fx_to_claim_items, upsert_fx_rate
@@ -297,6 +302,15 @@ def claim_detail(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     docs = list_source_files(session, claim=claim, user=user)
     items = list_items(session, claim_id=claim.id)
+    edit_item = None
+    edit_item_id = request.query_params.get("edit_item_id")
+    if edit_item_id:
+        try:
+            edit_uuid = uuid.UUID(edit_item_id)
+        except ValueError:
+            edit_uuid = None
+        if edit_uuid:
+            edit_item = next((i for i in items if i.id == edit_uuid), None)
     tasks = list_tasks(session, claim_id=claim.id)
     violations = list(
         session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
@@ -317,11 +331,161 @@ def claim_detail(
             "claim": claim,
             "docs": docs,
             "items": items,
+            "edit_item": edit_item,
             "tasks": tasks,
             "violations": violations,
             "exports": exports,
+            "expense_categories": [
+                "transport",
+                "lodging",
+                "airfare",
+                "meals",
+                "travel_ancillary",
+                "airline_fee",
+                "other",
+            ],
+            "currency_options": sorted(
+                {claim.home_currency, "USD", "SGD", "CAD", "GBP", "EUR"}
+            ),
         },
     )
+
+
+@router.post("/app/claims/{claim_id}/items/new", response_class=RedirectResponse)
+def create_expense_item_ui(
+    claim_id: uuid.UUID,
+    request: Request,
+    vendor: str = Form(...),
+    transaction_date: str = Form(""),
+    amount_original_amount: str = Form(...),
+    amount_original_currency: str = Form(...),
+    category: str = Form(""),
+    description: str = Form(""),
+    hotel_nights: str = Form(""),
+    flight_duration_hours: str = Form(""),
+    flight_cabin_class: str = Form(""),
+    attendees: str = Form(""),
+    employee_reviewed: str = Form(""),
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+
+    tx_date = date.fromisoformat(transaction_date) if transaction_date else None
+    amt = Decimal(amount_original_amount)
+
+    metadata: dict = {}
+    if hotel_nights:
+        try:
+            metadata["hotel_nights"] = int(hotel_nights)
+        except ValueError:
+            pass
+    if flight_duration_hours:
+        try:
+            metadata["flight_duration_hours"] = float(flight_duration_hours)
+        except ValueError:
+            pass
+    if flight_cabin_class.strip():
+        metadata["flight_cabin_class"] = flight_cabin_class.strip()
+    if attendees.strip():
+        metadata["attendees"] = attendees.strip()
+    metadata["employee_reviewed"] = bool(employee_reviewed)
+
+    create_manual_item(
+        session,
+        claim=claim,
+        user=user,
+        vendor=vendor,
+        category=category or None,
+        description=description or None,
+        transaction_date=tx_date,
+        amount_original_amount=amt,
+        amount_original_currency=amount_original_currency,
+        metadata_json=metadata,
+    )
+    apply_fx_to_claim_items(session, claim_id=claim.id)
+    evaluate_claim(session, claim_id=claim.id)
+    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+
+
+@router.post("/app/claims/{claim_id}/items/{item_id}/update", response_class=RedirectResponse)
+def update_expense_item_ui(
+    claim_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: Request,
+    vendor: str = Form(...),
+    transaction_date: str = Form(""),
+    amount_original_amount: str = Form(...),
+    amount_original_currency: str = Form(...),
+    category: str = Form(""),
+    description: str = Form(""),
+    hotel_nights: str = Form(""),
+    flight_duration_hours: str = Form(""),
+    flight_cabin_class: str = Form(""),
+    attendees: str = Form(""),
+    employee_reviewed: str = Form(""),
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+
+    metadata: dict = {}
+    if hotel_nights:
+        try:
+            metadata["hotel_nights"] = int(hotel_nights)
+        except ValueError:
+            metadata["hotel_nights"] = None
+    else:
+        metadata["hotel_nights"] = None
+
+    if flight_duration_hours:
+        try:
+            metadata["flight_duration_hours"] = float(flight_duration_hours)
+        except ValueError:
+            metadata["flight_duration_hours"] = None
+    else:
+        metadata["flight_duration_hours"] = None
+
+    metadata["flight_cabin_class"] = flight_cabin_class.strip() or None
+    metadata["attendees"] = attendees.strip() or None
+    metadata["employee_reviewed"] = bool(employee_reviewed)
+
+    changes = {
+        "vendor": vendor,
+        "category": category,
+        "description": description,
+        "transaction_date": date.fromisoformat(transaction_date) if transaction_date else None,
+        "amount_original_amount": Decimal(amount_original_amount),
+        "amount_original_currency": amount_original_currency,
+        "metadata_json": metadata,
+    }
+    update_expense_item(session, claim=claim, user=user, item_id=item_id, changes=changes)
+    apply_fx_to_claim_items(session, claim_id=claim.id)
+    evaluate_claim(session, claim_id=claim.id)
+    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+
+
+@router.post("/app/claims/{claim_id}/items/{item_id}/delete", response_class=RedirectResponse)
+def delete_expense_item_ui(
+    claim_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    delete_expense_item(session, claim=claim, user=user, item_id=item_id)
+    evaluate_claim(session, claim_id=claim.id)
+    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
 @router.post("/app/claims/{claim_id}/route-to-me", response_class=RedirectResponse)
@@ -340,6 +504,24 @@ def route_to_me(
     except Exception:  # noqa: BLE001
         pass
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+
+
+@router.post("/app/claims/{claim_id}/delete", response_class=RedirectResponse)
+def delete_claim_ui(
+    claim_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    try:
+        delete_claim(session, claim=claim, user=user)
+    except Exception:  # noqa: BLE001
+        return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+    return RedirectResponse(url="/app", status_code=303)
 
 
 @router.post("/app/claims/{claim_id}/update", response_class=RedirectResponse)
@@ -452,6 +634,8 @@ def set_fx_ui(
     request: Request,
     usd_to_home: str = Form(""),
     cad_to_home: str = Form(""),
+    gbp_to_home: str = Form(""),
+    eur_to_home: str = Form(""),
     session: Session = Depends(db_session),
 ) -> RedirectResponse:
     user = _get_optional_user(request, session)
@@ -473,6 +657,22 @@ def set_fx_ui(
             from_currency="CAD",
             to_currency=claim.home_currency,
             rate=Decimal(cad_to_home),
+        )
+    if gbp_to_home:
+        upsert_fx_rate(
+            session,
+            claim_id=claim.id,
+            from_currency="GBP",
+            to_currency=claim.home_currency,
+            rate=Decimal(gbp_to_home),
+        )
+    if eur_to_home:
+        upsert_fx_rate(
+            session,
+            claim_id=claim.id,
+            from_currency="EUR",
+            to_currency=claim.home_currency,
+            rate=Decimal(eur_to_home),
         )
     apply_fx_to_claim_items(session, claim_id=claim.id)
     evaluate_claim(session, claim_id=claim.id)

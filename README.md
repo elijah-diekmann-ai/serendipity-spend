@@ -25,6 +25,24 @@ Automates the intake-to-approval workflow.
 
 ---
 
+## Uploads & extraction (v1)
+
+- **Upload types**: PDF, images (PNG/JPG), ZIP bundles, and `.eml` email files (attachments are ingested).
+- **Batch uploads**: multi-file selection + drag-and-drop in the UI.
+- **Unrecognized receipts**: the system creates a task and employees can add/edit expense items manually.
+
+## Policy checks (v1)
+
+- Claim purpose required (`R001`, FAIL)
+- Travel dates required (`R002`, FAIL)
+- Uber trip summary may be insufficient (`R010`, NEEDS_INFO)
+- Grab receipt indicates PERSONAL profile (`R020`, WARN)
+- Missing FX rate to home currency (`R030`, NEEDS_INFO)
+- Generic “total” extraction requires employee review (`R040`, NEEDS_INFO)
+- Hotel nightly cap (USD 300/night) using `hotel_nights` (`R101`–`R103`)
+- Meals over USD 100 require attendees (`R111`–`R112`)
+- Flights under 6 hours must be economy (`R121`–`R123`)
+
 ## Run locally
 
 ### 1. Install
