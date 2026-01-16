@@ -7,6 +7,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from serendipity_spend.core.currencies import normalize_currency
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.identity.models import User, UserRole
 from serendipity_spend.modules.policy.blocking import is_violation_blocking
@@ -14,10 +15,16 @@ from serendipity_spend.modules.policy.models import PolicyViolation, ViolationSt
 
 
 def create_claim(session: Session, *, employee_id: uuid.UUID, home_currency: str) -> Claim:
+    home_currency_norm = normalize_currency(home_currency)
+    if not home_currency_norm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="home_currency must be a valid ISO-4217 code",
+        )
     claim = Claim(
         employee_id=employee_id,
         approver_id=None,
-        home_currency=home_currency.upper(),
+        home_currency=home_currency_norm,
         status=ClaimStatus.DRAFT,
     )
     session.add(claim)
@@ -75,6 +82,14 @@ def update_claim(session: Session, *, claim: Claim, user: User, **changes) -> Cl
     for field, value in changes.items():
         if value is None:
             continue
+        if field == "home_currency":
+            cur = normalize_currency(value)
+            if not cur:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="home_currency must be a valid ISO-4217 code",
+                )
+            value = cur
         setattr(claim, field, value)
     session.add(claim)
     session.commit()

@@ -546,14 +546,29 @@
       <!-- FX Rates -->
       <div class="sidebar-card">
         <h3 class="sidebar-label">FX Rates</h3>
+        {% if fx_error %}
+          <div class="callout warning mb-1">Auto-fill unavailable. Enter rates manually.</div>
+        {% endif %}
+        {% if fx_invalid %}
+          <div class="callout warning mb-1">{{ fx_invalid }}</div>
+        {% endif %}
+        {% if fx_skipped %}
+          <div class="callout warning mb-1">Skipped invalid currency code(s): {{ fx_skipped }}</div>
+        {% endif %}
         <form method="post" action="/app/claims/{{ claim.id }}/fx/auto" class="mb-1">
           <button class="btn btn-sm" type="submit" style="width:100%;">Auto-fill rates</button>
         </form>
         <form method="post" action="/app/claims/{{ claim.id }}/fx" class="fx-form">
-          <div class="fx-row"><label>USD</label><input name="usd_to_home" value="{{ fx_values.get('USD', '') }}" placeholder="1.35" /></div>
-          <div class="fx-row"><label>CAD</label><input name="cad_to_home" value="{{ fx_values.get('CAD', '') }}" placeholder="1.00" /></div>
-          <div class="fx-row"><label>GBP</label><input name="gbp_to_home" value="{{ fx_values.get('GBP', '') }}" placeholder="1.70" /></div>
-          <div class="fx-row"><label>EUR</label><input name="eur_to_home" value="{{ fx_values.get('EUR', '') }}" placeholder="1.45" /></div>
+          {% if fx_currencies|length == 0 %}
+            <div class="muted" style="font-size:12px;">No non-home currencies detected.</div>
+          {% else %}
+            {% for cur in fx_currencies %}
+              <div class="fx-row">
+                <label>{{ cur }}</label>
+                <input name="fx_rate_{{ cur }}" value="{{ fx_values.get(cur, '') }}" placeholder="e.g. 1.35" />
+              </div>
+            {% endfor %}
+          {% endif %}
           <button class="btn btn-sm mt-1" type="submit" style="width:100%;">Save rates</button>
         </form>
       </div>

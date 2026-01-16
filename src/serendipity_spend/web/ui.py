@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import URL
 
 from serendipity_spend.core.config import settings
+from serendipity_spend.core.currencies import all_currency_codes, normalize_currency
 from serendipity_spend.core.db import db_session
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
@@ -432,6 +433,17 @@ def claim_detail(
             )
         )
     }
+    home_cur = str(claim.home_currency or "").upper()
+    fx_currency_set: set[str] = set()
+    for item in items:
+        cur = normalize_currency(getattr(item, "amount_original_currency", None))
+        if cur and cur != home_cur:
+            fx_currency_set.add(cur)
+    for cur in fx_values.keys():
+        cur_norm = normalize_currency(cur)
+        if cur_norm and cur_norm != home_cur:
+            fx_currency_set.add(cur_norm)
+    fx_currencies = sorted(fx_currency_set)
 
     edit_item = None
     edit_item_id = request.query_params.get("edit_item_id")
@@ -523,6 +535,9 @@ def claim_detail(
     approve_error = request.query_params.get("approve_error")
     approve_ok = request.query_params.get("approve_ok")
     delete_error = request.query_params.get("delete_error")
+    fx_error = request.query_params.get("fx_error")
+    fx_invalid = request.query_params.get("fx_invalid")
+    fx_skipped = request.query_params.get("fx_skipped")
 
     return templates.TemplateResponse(
         "claim_detail.html",
@@ -548,6 +563,7 @@ def claim_detail(
             "open_other_tasks": open_other_tasks,
             "exports": exports,
             "fx_values": fx_values,
+            "fx_currencies": fx_currencies,
             "submit_error": submit_error,
             "submit_ok": submit_ok,
             "route_error": route_error,
@@ -557,6 +573,9 @@ def claim_detail(
             "approve_error": approve_error,
             "approve_ok": approve_ok,
             "delete_error": delete_error,
+            "fx_error": fx_error,
+            "fx_invalid": fx_invalid,
+            "fx_skipped": fx_skipped,
             "route_targets": route_targets,
             "expense_categories": [
                 "transport",
@@ -567,9 +586,10 @@ def claim_detail(
                 "airline_fee",
                 "other",
             ],
-            "currency_options": sorted(
-                {claim.home_currency, "USD", "SGD", "CAD", "GBP", "EUR"}
-            ),
+            "currency_options": [
+                home_cur,
+                *[c for c in all_currency_codes() if c != home_cur],
+            ],
         },
     )
 
@@ -777,9 +797,15 @@ def delete_claim_ui(
         delete_claim(session, claim=claim, user=user)
     except HTTPException as e:
         detail = e.detail if isinstance(e.detail, str) else "Could not delete claim."
-        return RedirectResponse(url=f"/app/claims/{claim.id}?delete_error={quote(detail)}", status_code=303)
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?delete_error={quote(detail)}",
+            status_code=303,
+        )
     except Exception as e:  # noqa: BLE001
-        return RedirectResponse(url=f"/app/claims/{claim.id}?delete_error={quote(str(e))}", status_code=303)
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?delete_error={quote(str(e))}",
+            status_code=303,
+        )
     return RedirectResponse(url="/app", status_code=303)
 
 
@@ -986,53 +1012,58 @@ def resolve_task_ui(
 
 
 @router.post("/app/claims/{claim_id}/fx", response_class=RedirectResponse)
-def set_fx_ui(
+async def set_fx_ui(
     claim_id: uuid.UUID,
     request: Request,
-    usd_to_home: str = Form(""),
-    cad_to_home: str = Form(""),
-    gbp_to_home: str = Form(""),
-    eur_to_home: str = Form(""),
     session: Session = Depends(db_session),
 ) -> RedirectResponse:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
-    if usd_to_home:
-        upsert_fx_rate(
-            session,
-            claim_id=claim.id,
-            from_currency="USD",
-            to_currency=claim.home_currency,
-            rate=Decimal(usd_to_home),
-        )
-    if cad_to_home:
-        upsert_fx_rate(
-            session,
-            claim_id=claim.id,
-            from_currency="CAD",
-            to_currency=claim.home_currency,
-            rate=Decimal(cad_to_home),
-        )
-    if gbp_to_home:
-        upsert_fx_rate(
-            session,
-            claim_id=claim.id,
-            from_currency="GBP",
-            to_currency=claim.home_currency,
-            rate=Decimal(gbp_to_home),
-        )
-    if eur_to_home:
-        upsert_fx_rate(
-            session,
-            claim_id=claim.id,
-            from_currency="EUR",
-            to_currency=claim.home_currency,
-            rate=Decimal(eur_to_home),
-        )
+
+    form = await request.form()
+    invalid: list[str] = []
+    for key, value in form.multi_items():
+        val = str(value or "").strip()
+        if not val:
+            continue
+
+        cur = None
+        if key.startswith("fx_rate_"):
+            cur = key.removeprefix("fx_rate_").strip().upper()
+        elif key.lower().endswith("_to_home") and len(key) >= 3:
+            cur = key[:3].strip().upper()
+
+        cur_norm = normalize_currency(cur) if cur else None
+        if not cur_norm:
+            if cur:
+                invalid.append(cur)
+            continue
+
+        try:
+            rate = Decimal(val)
+        except Exception:
+            invalid.append(cur_norm)
+            continue
+
+        try:
+            upsert_fx_rate(
+                session,
+                claim_id=claim.id,
+                from_currency=cur_norm,
+                to_currency=claim.home_currency,
+                rate=rate,
+            )
+        except ValueError:
+            invalid.append(cur_norm)
+            continue
+
     apply_fx_to_claim_items(session, claim_id=claim.id)
     evaluate_claim(session, claim_id=claim.id)
+    if invalid:
+        msg = quote("Invalid FX inputs: " + ", ".join(sorted(set(invalid))))
+        return RedirectResponse(url=f"/app/claims/{claim.id}?fx_invalid={msg}", status_code=303)
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
@@ -1056,17 +1087,21 @@ def auto_fx_ui(
         )
         if c
     }
-    currencies.update({"USD", "CAD", "GBP", "EUR"})
     currencies.discard(claim.home_currency.upper())
 
     try:
-        auto_upsert_fx_rates(
+        _rates, skipped = auto_upsert_fx_rates(
             session,
             claim_id=claim.id,
             to_currency=claim.home_currency,
             from_currencies=currencies,
         )
         evaluate_claim(session, claim_id=claim.id)
+        if skipped:
+            return RedirectResponse(
+                url=f"/app/claims/{claim.id}?fx_skipped={quote(','.join(sorted(skipped)))}",
+                status_code=303,
+            )
         return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
     except Exception:  # noqa: BLE001
         # Fall back to manual entry if the external FX service is unavailable.

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     receipt_ai_max_chars: int = 12000
 
     openai_api_key: str | None = None
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5.1"
     openai_base_url: str = "https://api.openai.com/v1"
 
 

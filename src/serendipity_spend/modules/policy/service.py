@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from serendipity_spend.core.currencies import is_iso4217_currency
 from serendipity_spend.modules.claims.models import Claim
 from serendipity_spend.modules.expenses.models import ExpenseItem
 from serendipity_spend.modules.fx.models import FxRate
@@ -157,6 +158,28 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                     data={"profile": "PERSONAL", "submit_blocking": False},
                 )
             )
+
+        if not is_iso4217_currency(item.amount_original_currency):
+            issues.append(
+                Issue(
+                    dedupe_key=f"item:{item.id}:R031",
+                    claim_id=claim.id,
+                    expense_item_id=item.id,
+                    rule_id="R031",
+                    severity=PolicySeverity.NEEDS_INFO,
+                    title="Invalid currency code",
+                    message=(
+                        f"'{item.amount_original_currency}' is not a valid ISO-4217 currency. "
+                        "Edit the item and set the correct currency."
+                    ),
+                    data={
+                        "currency": item.amount_original_currency,
+                        "submit_blocking": True,
+                    },
+                )
+            )
+            # Avoid misleading downstream FX messaging (e.g., R030) on invalid codes.
+            continue
 
         if item.amount_home_amount is None and item.amount_original_currency != claim.home_currency:
             issues.append(

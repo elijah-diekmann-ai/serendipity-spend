@@ -14,6 +14,12 @@ from serendipity_spend.modules.policy.models import PolicySeverity, PolicyViolat
 from serendipity_spend.modules.policy.service import evaluate_claim
 
 
+def test_extract_total_amount_rejects_non_iso_currency_codes():
+    from serendipity_spend.modules.extraction.service import _extract_total_amount
+
+    assert _extract_total_amount("Example\nGrand Total GMT 650.00\n") is None
+
+
 def test_parse_generic_receipt_extracts_total_and_date():
     from serendipity_spend.modules.extraction.service import _parse_generic_receipt
 
@@ -234,3 +240,49 @@ def test_policy_short_flight_must_be_economy():
             session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
         )
         assert any(v.rule_id == "R123" and v.severity == PolicySeverity.FAIL for v in violations)
+
+
+def test_policy_invalid_currency_emits_r031_not_r030():
+    from serendipity_spend.modules.expenses.models import ExpenseItem
+
+    with SessionLocal() as session:
+        employee = create_user(
+            session, email="employee@example.com", password="pw", role=UserRole.EMPLOYEE
+        )
+        claim = create_claim(session, employee_id=employee.id, home_currency="USD")
+        update_claim(
+            session,
+            claim=claim,
+            user=employee,
+            travel_start_date=date(2026, 1, 1),
+            travel_end_date=date(2026, 1, 2),
+            purpose="Work trip",
+        )
+
+        session.add(
+            ExpenseItem(
+                claim_id=claim.id,
+                vendor="Bad Currency Vendor",
+                vendor_reference=None,
+                receipt_type="manual",
+                category="other",
+                description="Invalid currency",
+                transaction_date=date(2026, 1, 1),
+                transaction_at=None,
+                amount_original_amount=Decimal("10.00"),
+                amount_original_currency="GMT",
+                amount_home_amount=None,
+                amount_home_currency=claim.home_currency,
+                fx_rate_to_home=None,
+                metadata_json={"employee_reviewed": True},
+                dedupe_key="manual:bad-currency",
+            )
+        )
+        session.commit()
+
+        evaluate_claim(session, claim_id=claim.id)
+        violations = list(
+            session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
+        )
+        assert any(v.rule_id == "R031" and v.data_json.get("submit_blocking") for v in violations)
+        assert not any(v.rule_id == "R030" for v in violations)
