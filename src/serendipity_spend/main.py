@@ -4,10 +4,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from serendipity_spend.api.router import router as api_router
 from serendipity_spend.bootstrap import bootstrap
-from serendipity_spend.web.ui import router as ui_router
+from serendipity_spend.web.ui import router as ui_router, STATIC_DIR
 
 
 def create_app() -> FastAPI:
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_router)
     app.include_router(ui_router)
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
 
 
