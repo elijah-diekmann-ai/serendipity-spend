@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import uuid
 from copy import copy
 from datetime import UTC, date, datetime
@@ -256,6 +257,13 @@ def _source_file_to_pdf_reader(*, source: SourceFile, body: bytes) -> PdfReader:
     if _is_image_source(source.filename, source.content_type):
         pdf_bytes = _image_bytes_to_pdf(body)
         return PdfReader(io.BytesIO(pdf_bytes))
+    if _is_text_source(source.filename, source.content_type):
+        pdf_bytes = _text_bytes_to_pdf(
+            body,
+            filename=source.filename,
+            content_type=source.content_type,
+        )
+        return PdfReader(io.BytesIO(pdf_bytes))
     raise ValueError(f"Unsupported supporting document type: {source.filename}")
 
 
@@ -270,6 +278,151 @@ def _is_image_source(filename: str, content_type: str | None) -> bool:
         return True
     lower = filename.lower()
     return lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"))
+
+
+def _is_text_source(filename: str, content_type: str | None) -> bool:
+    ctype = (content_type or "").lower()
+    if ctype.startswith("text/plain") or ctype.startswith("text/html"):
+        return True
+    lower = filename.lower()
+    return lower.endswith((".txt", ".md", ".html", ".htm", ".csv"))
+
+
+def _text_bytes_to_pdf(body: bytes, *, filename: str, content_type: str | None) -> bytes:
+    ctype = (content_type or "").lower()
+    is_html = ctype.startswith("text/html") or filename.lower().endswith((".html", ".htm"))
+    try:
+        text = body.decode("utf-8", errors="replace")
+    except Exception:
+        text = body.decode("latin-1", errors="replace")
+    if is_html:
+        text = _html_to_text(text)
+    return _text_to_pdf(text)
+
+
+def _html_to_text(html: str) -> str:
+    from html import unescape
+
+    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</p\s*>", "\n\n", html)
+    html = re.sub(r"(?i)</div\s*>", "\n", html)
+    html = re.sub(r"(?s)<[^>]+>", "", html)
+    html = unescape(html)
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in html.splitlines()]
+    out_lines: list[str] = []
+    last_blank = False
+    for ln in lines:
+        if not ln:
+            if not last_blank:
+                out_lines.append("")
+            last_blank = True
+            continue
+        out_lines.append(ln)
+        last_blank = False
+    return "\n".join(out_lines).strip()
+
+
+def _text_to_pdf(text: str) -> bytes:
+    # Minimal, dependency-free text->PDF using a built-in Type1 font.
+    page_width = 612
+    page_height = 792
+    margin_x = 72
+    margin_top = 72
+    margin_bottom = 72
+    font_size = 10
+    leading = 12
+
+    usable_width = page_width - 2 * margin_x
+    char_width = font_size * 0.6  # Courier is 600 units wide.
+    max_chars = max(int(usable_width / char_width), 40)
+
+    def wrap_line(line: str) -> list[str]:
+        line = line.replace("\t", "    ").rstrip("\n")
+        if not line:
+            return [""]
+        out: list[str] = []
+        while len(line) > max_chars:
+            out.append(line[:max_chars])
+            line = line[max_chars:]
+        out.append(line)
+        return out
+
+    wrapped: list[str] = []
+    for ln in (text or "").splitlines():
+        wrapped.extend(wrap_line(ln))
+    if not wrapped:
+        wrapped = [""]
+
+    lines_per_page = max(int((page_height - margin_top - margin_bottom) / leading), 1)
+    pages = [
+        wrapped[i : i + lines_per_page] for i in range(0, len(wrapped), lines_per_page)
+    ]
+
+    def pdf_escape(s: str) -> str:
+        s = s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return "".join(ch if ord(ch) >= 32 else " " for ch in s)
+
+    objects: list[bytes] = []
+    # 1: catalog, 2: pages, 3: font
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"")  # placeholder for /Pages
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
+
+    kids: list[str] = []
+    for idx, page_lines in enumerate(pages):
+        page_obj_num = 4 + idx * 2
+        content_obj_num = 5 + idx * 2
+        kids.append(f"{page_obj_num} 0 R")
+
+        start_y = page_height - margin_top - font_size
+        stream_lines = ["BT", f"/F1 {font_size} Tf", f"{margin_x} {start_y} Td"]
+        for ln in page_lines:
+            stream_lines.append(f"({pdf_escape(ln)}) Tj")
+            stream_lines.append(f"0 -{leading} Td")
+        stream_lines.append("ET")
+        stream = ("\n".join(stream_lines) + "\n").encode("latin-1", errors="replace")
+
+        page_obj = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj_num} 0 R >>"
+        ).encode("ascii")
+        content_obj = (
+            b"<< /Length "
+            + str(len(stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + stream
+            + b"endstream"
+        )
+        objects.append(page_obj)
+        objects.append(content_obj)
+
+    pages_obj = (
+        f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(pages)} >>"
+    ).encode("ascii")
+    objects[1] = pages_obj
+
+    out = bytearray()
+    out.extend(b"%PDF-1.4\n")
+
+    offsets: list[int] = [0]
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out.extend(f"{i} 0 obj\n".encode("ascii"))
+        out.extend(obj)
+        out.extend(b"\nendobj\n")
+
+    xref_offset = len(out)
+    out.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    out.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        out.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    out.extend(b"trailer\n")
+    out.extend(f"<< /Size {len(objects) + 1} /Root 1 0 R >>\n".encode("ascii"))
+    out.extend(b"startxref\n")
+    out.extend(f"{xref_offset}\n".encode("ascii"))
+    out.extend(b"%%EOF\n")
+    return bytes(out)
 
 
 def _image_bytes_to_pdf(body: bytes) -> bytes:
