@@ -5,13 +5,22 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from serendipity_spend.modules.claims.models import Claim
 from serendipity_spend.modules.expenses.models import ExpenseItem
 from serendipity_spend.modules.fx.models import FxRate
-from serendipity_spend.modules.policy.models import PolicySeverity, PolicyViolation, ViolationStatus
+from serendipity_spend.modules.identity.models import User, UserRole
+from serendipity_spend.modules.policy.blocking import EXCEPTION_ELIGIBLE_RULE_IDS
+from serendipity_spend.modules.policy.models import (
+    PolicyException,
+    PolicyExceptionStatus,
+    PolicySeverity,
+    PolicyViolation,
+    ViolationStatus,
+)
 from serendipity_spend.modules.workflow.models import Task, TaskStatus
 
 
@@ -40,12 +49,28 @@ def _is_generic_extraction(item: ExpenseItem) -> bool:
     return str(item.receipt_type or "").strip().lower() == "generic_receipt"
 
 
+def _exception_data(exc: PolicyException) -> dict:
+    return {
+        "id": str(exc.id),
+        "status": exc.status.value,
+        "justification": exc.justification,
+        "requested_by_user_id": str(exc.requested_by_user_id),
+        "decided_by_user_id": str(exc.decided_by_user_id) if exc.decided_by_user_id else None,
+        "decided_at": exc.decided_at.isoformat() if exc.decided_at else None,
+        "decision_comment": exc.decision_comment,
+    }
+
+
 def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
     claim = session.scalar(select(Claim).where(Claim.id == claim_id))
     if not claim:
         return
 
     items = list(session.scalars(select(ExpenseItem).where(ExpenseItem.claim_id == claim.id)))
+    exceptions = list(
+        session.scalars(select(PolicyException).where(PolicyException.claim_id == claim.id))
+    )
+    exceptions_by_key = {e.dedupe_key: e for e in exceptions}
 
     issues: list[Issue] = []
 
@@ -224,25 +249,29 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 else:
                     nightly = (per_night_usd / Decimal(nights_int)).quantize(Decimal("0.01"))
                     if nightly > Decimal("300.00"):
+                        dedupe_key = f"item:{item.id}:R103"
+                        exc = exceptions_by_key.get(dedupe_key)
+                        exc_data = _exception_data(exc) if exc else None
                         issues.append(
                             Issue(
-                                dedupe_key=f"item:{item.id}:R103",
+                                dedupe_key=dedupe_key,
                                 claim_id=claim.id,
                                 expense_item_id=item.id,
                                 rule_id="R103",
                                 severity=PolicySeverity.FAIL,
                                 title="Hotel nightly rate exceeds USD 300",
-                            message=(
-                                f"Nightly rate is approx USD {nightly} (cap is USD 300). "
-                                "Provide justification or adjust the claim."
-                            ),
-                            data={
-                                "nightly_usd": str(nightly),
-                                "cap_usd": "300.00",
-                                "submit_blocking": True,
-                            },
+                                message=(
+                                    f"Nightly rate is approx USD {nightly} (cap is USD 300). "
+                                    "Provide justification or adjust the claim."
+                                ),
+                                data={
+                                    "nightly_usd": str(nightly),
+                                    "cap_usd": "300.00",
+                                    "submit_blocking": True,
+                                    "exception": exc_data,
+                                },
+                            )
                         )
-                    )
 
         # R111: meals over USD 100 require attendees
         if str(item.category or "").lower() in {"meals", "food", "food_and_beverage"}:
@@ -316,9 +345,12 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 )
             if duration_hours is not None and cabin and duration_hours < Decimal("6"):
                 if cabin != "economy":
+                    dedupe_key = f"item:{item.id}:R123"
+                    exc = exceptions_by_key.get(dedupe_key)
+                    exc_data = _exception_data(exc) if exc else None
                     issues.append(
                         Issue(
-                            dedupe_key=f"item:{item.id}:R123",
+                            dedupe_key=dedupe_key,
                             claim_id=claim.id,
                             expense_item_id=item.id,
                             rule_id="R123",
@@ -332,6 +364,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                                 "duration_hours": str(duration_hours),
                                 "cabin": cabin,
                                 "submit_blocking": True,
+                                "exception": exc_data,
                             },
                         )
                     )
@@ -412,8 +445,26 @@ def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
 
     desired_keys: set[tuple[uuid.UUID, uuid.UUID | None, str]] = set()
     for issue in issues:
+        exc = (issue.data or {}).get("exception") or {}
+        exc_status = str(exc.get("status") or "").upper()
+        exc_justification = str(exc.get("justification") or "").strip()
+
+        if (
+            issue.rule_id in EXCEPTION_ELIGIBLE_RULE_IDS
+            and exc_status == PolicyExceptionStatus.APPROVED.value
+        ):
+            continue
+
         task_type = f"POLICY_{issue.rule_id}"
         desired_keys.add((issue.claim_id, issue.expense_item_id, task_type))
+
+        assigned_to_user_id = claim.employee_id
+        description = issue.message
+        if issue.rule_id in EXCEPTION_ELIGIBLE_RULE_IDS:
+            if exc_status == PolicyExceptionStatus.REQUESTED.value and claim.approver_id:
+                assigned_to_user_id = claim.approver_id
+                if exc_justification:
+                    description = f"{issue.message}\n\nJustification: {exc_justification}"
 
         task = session.scalar(
             select(Task)
@@ -429,17 +480,18 @@ def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
                 claim_id=issue.claim_id,
                 expense_item_id=issue.expense_item_id,
                 created_by_user_id=None,
-                assigned_to_user_id=claim.employee_id,
+                assigned_to_user_id=assigned_to_user_id,
                 type=task_type,
                 title=issue.title,
-                description=issue.message,
+                description=description,
                 status=TaskStatus.OPEN,
                 resolved_at=None,
             )
             session.add(task)
         else:
             task.title = issue.title
-            task.description = issue.message
+            task.description = description
+            task.assigned_to_user_id = assigned_to_user_id
             if task.status == TaskStatus.RESOLVED:
                 task.status = TaskStatus.OPEN
                 task.resolved_at = None
@@ -464,3 +516,123 @@ def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
         session.add(t)
 
     session.commit()
+
+
+def request_policy_exception(
+    session: Session, *, violation_id: uuid.UUID, user: User, justification: str
+) -> PolicyException:
+    violation = session.scalar(select(PolicyViolation).where(PolicyViolation.id == violation_id))
+    if not violation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Policy violation not found",
+        )
+
+    if violation.rule_id not in EXCEPTION_ELIGIBLE_RULE_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This policy rule does not support exceptions.",
+        )
+    if violation.severity != PolicySeverity.FAIL:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only FAIL violations can be requested as exceptions.",
+        )
+    if violation.status != ViolationStatus.OPEN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This policy violation is not open.",
+        )
+
+    claim = session.scalar(select(Claim).where(Claim.id == violation.claim_id))
+    if not claim:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
+
+    if user.role != UserRole.ADMIN and claim.employee_id != user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+
+    justification_clean = (justification or "").strip()
+    if not justification_clean:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Justification is required."
+        )
+
+    exc = session.scalar(
+        select(PolicyException).where(PolicyException.dedupe_key == violation.dedupe_key)
+    )
+    if not exc:
+        exc = PolicyException(
+            claim_id=violation.claim_id,
+            expense_item_id=violation.expense_item_id,
+            rule_id=violation.rule_id,
+            rule_version=violation.rule_version,
+            status=PolicyExceptionStatus.REQUESTED,
+            justification=justification_clean,
+            requested_by_user_id=user.id,
+            decided_by_user_id=None,
+            decided_at=None,
+            decision_comment=None,
+            dedupe_key=violation.dedupe_key,
+        )
+    else:
+        exc.expense_item_id = violation.expense_item_id
+        exc.rule_id = violation.rule_id
+        exc.rule_version = violation.rule_version
+        exc.status = PolicyExceptionStatus.REQUESTED
+        exc.justification = justification_clean
+        exc.requested_by_user_id = user.id
+        exc.decided_by_user_id = None
+        exc.decided_at = None
+        exc.decision_comment = None
+
+    session.add(exc)
+    session.commit()
+    session.refresh(exc)
+
+    evaluate_claim(session, claim_id=violation.claim_id)
+    session.refresh(exc)
+    return exc
+
+
+def decide_policy_exception(
+    session: Session,
+    *,
+    exception_id: uuid.UUID,
+    user: User,
+    decision: PolicyExceptionStatus,
+    comment: str | None,
+) -> PolicyException:
+    exc = session.scalar(select(PolicyException).where(PolicyException.id == exception_id))
+    if not exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Policy exception not found",
+        )
+
+    claim = session.scalar(select(Claim).where(Claim.id == exc.claim_id))
+    if not claim:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
+
+    if user.role not in {UserRole.APPROVER, UserRole.ADMIN}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+    if user.role == UserRole.APPROVER and claim.approver_id != user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+
+    if decision not in {PolicyExceptionStatus.APPROVED, PolicyExceptionStatus.REJECTED}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Decision must be APPROVED or REJECTED.",
+        )
+
+    now = datetime.now(UTC)
+    exc.status = decision
+    exc.decided_by_user_id = user.id
+    exc.decided_at = now
+    exc.decision_comment = (comment or "").strip() or None
+    session.add(exc)
+    session.commit()
+    session.refresh(exc)
+
+    evaluate_claim(session, claim_id=exc.claim_id)
+    session.refresh(exc)
+    return exc

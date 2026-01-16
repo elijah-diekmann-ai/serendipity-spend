@@ -7,7 +7,9 @@ Importing this module ensures all SQLAlchemy models are registered on Base.metad
 from __future__ import annotations
 
 # Import User first - other models have relationships to User
+# isort: off
 from serendipity_spend.modules.identity.models import User  # noqa: F401
+# isort: on
 
 from serendipity_spend.modules.audit.models import AuditEvent  # noqa: F401
 from serendipity_spend.modules.claims.models import Claim  # noqa: F401

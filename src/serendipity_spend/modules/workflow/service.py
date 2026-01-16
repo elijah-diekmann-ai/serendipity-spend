@@ -29,8 +29,13 @@ def resolve_task(session: Session, *, task_id: uuid.UUID, user: User) -> Task:
     if not claim:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
 
-    if user.role != UserRole.ADMIN and claim.employee_id != user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+    if user.role != UserRole.ADMIN:
+        if task.assigned_to_user_id == user.id:
+            pass
+        elif task.assigned_to_user_id is None and claim.employee_id == user.id:
+            pass
+        else:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
 
     if task.status == TaskStatus.RESOLVED:
         return task
@@ -56,6 +61,44 @@ def approve_claim(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Claim not in approver review"
         )
+
+    if decision == ApprovalDecision.APPROVED:
+        from serendipity_spend.modules.policy.blocking import is_violation_blocking
+        from serendipity_spend.modules.policy.models import PolicyViolation, ViolationStatus
+        from serendipity_spend.modules.policy.service import evaluate_claim
+
+        evaluate_claim(session, claim_id=claim.id)
+        open_violations = list(
+            session.scalars(
+                select(PolicyViolation).where(
+                    PolicyViolation.claim_id == claim.id,
+                    PolicyViolation.status == ViolationStatus.OPEN,
+                )
+            )
+        )
+        blocking = [
+            v
+            for v in open_violations
+            if is_violation_blocking(v, allow_pending_exceptions=False)
+        ]
+        if blocking:
+            blocking_rules = sorted({v.rule_id for v in blocking})
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Claim has unresolved policy items and cannot be approved.",
+                    "blocking_rules": blocking_rules,
+                    "blocking": [
+                        {
+                            "rule_id": v.rule_id,
+                            "severity": v.severity.value,
+                            "title": v.title,
+                            "message": v.message,
+                        }
+                        for v in blocking
+                    ],
+                },
+            )
 
     now = datetime.now(UTC)
     if decision == ApprovalDecision.APPROVED:

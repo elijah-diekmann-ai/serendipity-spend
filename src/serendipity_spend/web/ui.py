@@ -18,6 +18,7 @@ from serendipity_spend.core.config import settings
 from serendipity_spend.core.db import db_session
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
+from serendipity_spend.modules.claims.models import ClaimStatus
 from serendipity_spend.modules.claims.schemas import ClaimUpdate
 from serendipity_spend.modules.claims.service import (
     create_claim,
@@ -54,7 +55,10 @@ from serendipity_spend.modules.identity.google_oauth import (
 )
 from serendipity_spend.modules.identity.models import User, UserRole
 from serendipity_spend.modules.identity.service import authenticate_user, get_or_create_google_user
+from serendipity_spend.modules.policy.blocking import is_violation_blocking
 from serendipity_spend.modules.policy.models import (
+    PolicyException,
+    PolicyExceptionStatus,
     PolicySeverity,
     PolicyViolation,
     ViolationStatus,
@@ -121,10 +125,8 @@ def _policy_task_key(task: Task) -> str | None:
     return f"claim:{task.claim_id}:{rule_id}"
 
 
-def _is_blocking_violation(v: PolicyViolation) -> bool:
-    if v.severity == PolicySeverity.FAIL:
-        return True
-    return bool((v.data_json or {}).get("submit_blocking"))
+def _is_blocking_violation(v: PolicyViolation, *, allow_pending_exceptions: bool) -> bool:
+    return is_violation_blocking(v, allow_pending_exceptions=allow_pending_exceptions)
 
 
 @router.get("/", response_class=RedirectResponse)
@@ -459,6 +461,18 @@ def claim_detail(
     open_violations = [v for v in violations if v.status == ViolationStatus.OPEN]
     resolved_violations = [v for v in violations if v.status == ViolationStatus.RESOLVED]
 
+    policy_exceptions = list(
+        session.scalars(select(PolicyException).where(PolicyException.claim_id == claim.id))
+    )
+    policy_exceptions_by_key = {e.dedupe_key: e for e in policy_exceptions}
+
+    allow_pending_exceptions = True
+    if (
+        user.role in {UserRole.APPROVER, UserRole.ADMIN}
+        and claim.status == ClaimStatus.NEEDS_APPROVER_REVIEW
+    ):
+        allow_pending_exceptions = False
+
     severity_rank = {
         PolicySeverity.FAIL: 0,
         PolicySeverity.NEEDS_INFO: 1,
@@ -467,7 +481,9 @@ def claim_detail(
     }
     open_violations.sort(
         key=lambda v: (
-            0 if _is_blocking_violation(v) else 1,
+            0
+            if _is_blocking_violation(v, allow_pending_exceptions=allow_pending_exceptions)
+            else 1,
             0 if v.expense_item_id is None else 1,
             severity_rank.get(v.severity, 99),
             v.rule_id,
@@ -481,7 +497,7 @@ def claim_detail(
     for v in open_violations:
         key = v.severity.value
         violation_counts[key] = violation_counts.get(key, 0) + 1
-        if _is_blocking_violation(v):
+        if _is_blocking_violation(v, allow_pending_exceptions=allow_pending_exceptions):
             blocking_count += 1
 
     open_other_tasks = [
@@ -502,6 +518,10 @@ def claim_detail(
     submit_ok = request.query_params.get("submit_ok")
     route_error = request.query_params.get("route_error")
     route_ok = request.query_params.get("route_ok")
+    policy_error = request.query_params.get("policy_error")
+    policy_ok = request.query_params.get("policy_ok")
+    approve_error = request.query_params.get("approve_error")
+    approve_ok = request.query_params.get("approve_ok")
 
     return templates.TemplateResponse(
         "claim_detail.html",
@@ -516,6 +536,7 @@ def claim_detail(
             "tasks": tasks,
             "violations": violations,
             "policy_tasks_by_key": policy_tasks_by_key,
+            "policy_exceptions_by_key": policy_exceptions_by_key,
             "policy_summary": {
                 "open": open_violations,
                 "resolved": resolved_violations,
@@ -530,6 +551,10 @@ def claim_detail(
             "submit_ok": submit_ok,
             "route_error": route_error,
             "route_ok": route_ok,
+            "policy_error": policy_error,
+            "policy_ok": policy_ok,
+            "approve_error": approve_error,
+            "approve_ok": approve_ok,
             "route_targets": route_targets,
             "expense_categories": [
                 "transport",
@@ -856,6 +881,84 @@ def submit_claim_ui(
         )
 
 
+@router.post("/app/claims/{claim_id}/policy/exceptions/request", response_class=RedirectResponse)
+def request_policy_exception_ui(
+    claim_id: uuid.UUID,
+    request: Request,
+    violation_id: uuid.UUID = Form(...),
+    justification: str = Form(""),
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    try:
+        from serendipity_spend.modules.policy.service import request_policy_exception
+
+        request_policy_exception(
+            session,
+            violation_id=violation_id,
+            user=user,
+            justification=justification,
+        )
+        return RedirectResponse(url=f"/app/claims/{claim.id}?policy_ok=1#policy", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Exception request failed."
+        if isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?policy_error={quote(message)}#policy", status_code=303
+        )
+    except Exception:
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?policy_error={quote('Exception request failed.')}#policy",
+            status_code=303,
+        )
+
+
+@router.post("/app/policy/exceptions/{exception_id}/decide", response_class=RedirectResponse)
+def decide_policy_exception_ui(
+    exception_id: uuid.UUID,
+    request: Request,
+    claim_id: uuid.UUID = Form(...),
+    decision: str = Form(...),
+    comment: str = Form(""),
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    try:
+        from serendipity_spend.modules.policy.service import decide_policy_exception
+
+        decide_policy_exception(
+            session,
+            exception_id=exception_id,
+            user=user,
+            decision=PolicyExceptionStatus(decision),
+            comment=comment,
+        )
+        return RedirectResponse(url=f"/app/claims/{claim.id}?policy_ok=1#policy", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Decision failed."
+        if isinstance(detail, dict):
+            message = str(detail.get("message") or message)
+        elif isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?policy_error={quote(message)}#policy", status_code=303
+        )
+    except Exception:
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?policy_error={quote('Decision failed.')}#policy",
+            status_code=303,
+        )
+
+
 @router.post("/app/tasks/{task_id}/resolve", response_class=RedirectResponse)
 def resolve_task_ui(
     task_id: uuid.UUID,
@@ -1042,9 +1145,25 @@ def approve_ui(
         approve_claim(
             session, claim=claim, user=user, decision=ApprovalDecision.APPROVED, comment=None
         )
+        return RedirectResponse(url=f"/app/claims/{claim.id}?approve_ok=1", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Claim could not be approved."
+        if isinstance(detail, dict):
+            message = str(detail.get("message") or message)
+            rules = detail.get("blocking_rules") or []
+            if rules:
+                message = f"{message} Blocking: {', '.join(rules)}."
+        elif isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?approve_error={quote(message)}", status_code=303
+        )
     except Exception:
-        pass
-    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?approve_error={quote('Claim could not be approved.')}",
+            status_code=303,
+        )
 
 
 @router.post("/app/claims/{claim_id}/request-changes", response_class=RedirectResponse)
@@ -1065,9 +1184,20 @@ def request_changes_ui(
             decision=ApprovalDecision.CHANGES_REQUESTED,
             comment=None,
         )
+        return RedirectResponse(url=f"/app/claims/{claim.id}?approve_ok=1", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Decision failed."
+        if isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?approve_error={quote(message)}", status_code=303
+        )
     except Exception:
-        pass
-    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?approve_error={quote('Decision failed.')}",
+            status_code=303,
+        )
 
 
 @router.post("/app/claims/{claim_id}/reject", response_class=RedirectResponse)
@@ -1084,6 +1214,17 @@ def reject_ui(
         approve_claim(
             session, claim=claim, user=user, decision=ApprovalDecision.REJECTED, comment=None
         )
+        return RedirectResponse(url=f"/app/claims/{claim.id}?approve_ok=1", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Decision failed."
+        if isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?approve_error={quote(message)}", status_code=303
+        )
     except Exception:
-        pass
-    return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?approve_error={quote('Decision failed.')}",
+            status_code=303,
+        )
