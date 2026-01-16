@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -10,7 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.datastructures import URL
 
+from serendipity_spend.core.config import settings
 from serendipity_spend.core.db import db_session
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
@@ -28,8 +31,14 @@ from serendipity_spend.modules.expenses.service import list_items
 from serendipity_spend.modules.exports.models import ExportRun
 from serendipity_spend.modules.exports.service import create_export_run
 from serendipity_spend.modules.fx.service import apply_fx_to_claim_items, upsert_fx_rate
+from serendipity_spend.modules.identity.google_oauth import (
+    build_google_authorize_url,
+    exchange_google_code,
+    google_oauth_enabled,
+    verify_google_id_token,
+)
 from serendipity_spend.modules.identity.models import User
-from serendipity_spend.modules.identity.service import authenticate_user
+from serendipity_spend.modules.identity.service import authenticate_user, get_or_create_google_user
 from serendipity_spend.modules.policy.models import PolicyViolation
 from serendipity_spend.modules.policy.service import evaluate_claim
 from serendipity_spend.modules.workflow.models import ApprovalDecision
@@ -43,6 +52,23 @@ router = APIRouter(include_in_schema=False)
 router.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
 
+def _external_url(request: Request, url: URL) -> str:
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if forwarded_proto:
+        url = url.replace(scheme=forwarded_proto.split(",")[0].strip())
+    if forwarded_host:
+        url = url.replace(netloc=forwarded_host.split(",")[0].strip())
+    return str(url)
+
+
+def _is_https_request(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto") or ""
+    if forwarded_proto.split(",")[0].strip().lower() == "https":
+        return True
+    return request.url.scheme == "https"
+
+
 def _get_optional_user(request: Request, session: Session) -> User | None:
     token = request.cookies.get("access_token")
     if not token:
@@ -54,7 +80,15 @@ def _get_optional_user(request: Request, session: Session) -> User | None:
         user_id = uuid.UUID(subject)
     except ValueError:
         return None
-    return session.scalar(select(User).where(User.id == user_id, User.is_active.is_(True)))
+    user = session.scalar(select(User).where(User.id == user_id, User.is_active.is_(True)))
+    if not user:
+        return None
+    allowed_domain = (settings.google_oauth_allowed_domain or "").strip().lower()
+    if google_oauth_enabled() and allowed_domain and not user.email.lower().endswith(
+        f"@{allowed_domain}"
+    ):
+        return None
+    return user
 
 
 @router.get("/", response_class=RedirectResponse)
@@ -64,7 +98,15 @@ def root() -> RedirectResponse:
 
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "error": None,
+            "google_enabled": google_oauth_enabled(),
+            "password_enabled": not google_oauth_enabled(),
+        },
+    )
 
 
 @router.post("/login", response_class=RedirectResponse)
@@ -74,16 +116,41 @@ def login_submit(
     password: str = Form(...),
     session: Session = Depends(db_session),
 ) -> RedirectResponse:
+    if google_oauth_enabled():
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "error": "Password login is disabled (use Google).",
+                "google_enabled": True,
+                "password_enabled": False,
+            },
+            status_code=400,
+        )
+
     try:
         user = authenticate_user(session, email=email, password=password)
     except Exception:  # noqa: BLE001
         return templates.TemplateResponse(
-            "login.html", {"request": request, "error": "Invalid credentials"}, status_code=401
+            "login.html",
+            {
+                "request": request,
+                "error": "Invalid credentials",
+                "google_enabled": False,
+                "password_enabled": True,
+            },
+            status_code=401,
         )
 
     token = create_access_token(subject=str(user.id))
     resp = RedirectResponse(url="/app", status_code=303)
-    resp.set_cookie("access_token", token, httponly=True, samesite="lax")
+    resp.set_cookie(
+        "access_token",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=_is_https_request(request),
+    )
     return resp
 
 
@@ -91,6 +158,100 @@ def login_submit(
 def logout() -> RedirectResponse:
     resp = RedirectResponse(url="/login", status_code=303)
     resp.delete_cookie("access_token")
+    resp.delete_cookie("google_oauth_state")
+    return resp
+
+
+@router.get("/auth/google/login", response_class=RedirectResponse)
+def google_oauth_login(request: Request) -> RedirectResponse:
+    if not google_oauth_enabled():
+        return RedirectResponse(url="/login", status_code=303)
+
+    state = secrets.token_urlsafe(32)
+    callback_url = URL(str(request.url_for("google_oauth_callback")))
+    redirect_uri = _external_url(request, callback_url)
+    auth_url = build_google_authorize_url(state=state, redirect_uri=redirect_uri)
+
+    resp = RedirectResponse(url=auth_url, status_code=302)
+    resp.set_cookie(
+        "google_oauth_state",
+        state,
+        httponly=True,
+        samesite="lax",
+        max_age=600,
+        secure=_is_https_request(request),
+    )
+    return resp
+
+
+@router.get("/auth/google/callback", name="google_oauth_callback", response_class=RedirectResponse)
+def google_oauth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    if not google_oauth_enabled():
+        return RedirectResponse(url="/login", status_code=303)
+
+    cookie_state = request.cookies.get("google_oauth_state")
+    if error:
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "error": f"Google login failed: {error}",
+                "google_enabled": True,
+                "password_enabled": False,
+            },
+            status_code=401,
+        )
+    if not code or not state or not cookie_state or state != cookie_state:
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "error": "Google login failed: invalid state",
+                "google_enabled": True,
+                "password_enabled": False,
+            },
+            status_code=401,
+        )
+
+    try:
+        callback_url = URL(str(request.url_for("google_oauth_callback")))
+        redirect_uri = _external_url(request, callback_url)
+        tokens = exchange_google_code(code=code, redirect_uri=redirect_uri)
+        id_token = tokens.get("id_token")
+        if not isinstance(id_token, str) or not id_token:
+            raise ValueError("Missing id_token in Google response")
+        claims = verify_google_id_token(id_token)
+        email = str(claims.get("email"))
+        full_name = claims.get("name") if isinstance(claims.get("name"), str) else None
+        user = get_or_create_google_user(session, email=email, full_name=full_name)
+    except Exception as e:  # noqa: BLE001
+        return templates.TemplateResponse(
+            "login.html",
+            {
+                "request": request,
+                "error": f"Google login failed: {e}",
+                "google_enabled": True,
+                "password_enabled": False,
+            },
+            status_code=401,
+        )
+
+    token = create_access_token(subject=str(user.id))
+    resp = RedirectResponse(url="/app", status_code=303)
+    resp.delete_cookie("google_oauth_state")
+    resp.set_cookie(
+        "access_token",
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=_is_https_request(request),
+    )
     return resp
 
 

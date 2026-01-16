@@ -1,231 +1,313 @@
 {% extends "base.html" %}
 {% block content %}
-  <div class="panel">
-    <div class="panel-header">
+  <div class="page-header">
+    <div class="page-header-content">
       <div>
-        <h1 class="title">Claim {{ claim.id }}</h1>
-        <p class="subtitle">
-          Status: <span class="pill"><span class="dot ok"></span>{{ claim.status.value }}</span>
-          <span class="muted">
-            · Home currency: {{ claim.home_currency }}
-            · Approver: {{ claim.approver_id or '—' }}
+        <h1 class="page-title">Claim #{{ claim.id }}</h1>
+        <div class="flex items-center gap-1 mt-1">
+          {% if claim.status.value == 'DRAFT' %}
+            <span class="pill">{{ claim.status.value }}</span>
+          {% elif claim.status.value == 'APPROVED' %}
+            <span class="pill ok">{{ claim.status.value }}</span>
+          {% elif claim.status.value == 'REJECTED' %}
+            <span class="pill bad">{{ claim.status.value }}</span>
+          {% elif 'REVIEW' in claim.status.value %}
+            <span class="pill warn">{{ claim.status.value }}</span>
+          {% else %}
+            <span class="pill info">{{ claim.status.value }}</span>
+          {% endif %}
+          <span class="muted" style="margin-left: 8px;">
+            {{ claim.home_currency }}
+            {% if claim.approver_id %} · Approver: {{ claim.approver_id }}{% endif %}
           </span>
-        </p>
+        </div>
       </div>
       <div class="btn-row">
         {% if user.role.value == 'ADMIN' and not claim.approver_id %}
           <form method="post" action="/app/claims/{{ claim.id }}/route-to-me">
-            <button class="btn btn-ghost" type="submit">Route to me</button>
+            <button class="btn" type="submit">Route to me</button>
           </form>
         {% endif %}
         <form method="post" action="/app/claims/{{ claim.id }}/submit">
-          <button class="btn" type="submit">Submit</button>
+          <button class="btn btn-accent" type="submit">Submit</button>
         </form>
         <form method="post" action="/app/claims/{{ claim.id }}/export">
-          <button class="btn btn-ghost" type="submit">Generate export</button>
+          <button class="btn" type="submit">Generate export</button>
         </form>
         {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
-          <form method="post" action="/app/claims/{{ claim.id }}/approve"><button class="btn" type="submit">Approve</button></form>
-          <form method="post" action="/app/claims/{{ claim.id }}/request-changes"><button class="btn btn-ghost" type="submit">Request changes</button></form>
-          <form method="post" action="/app/claims/{{ claim.id }}/reject"><button class="btn btn-danger" type="submit">Reject</button></form>
+          <form method="post" action="/app/claims/{{ claim.id }}/approve">
+            <button class="btn btn-primary" type="submit">Approve</button>
+          </form>
+          <form method="post" action="/app/claims/{{ claim.id }}/request-changes">
+            <button class="btn" type="submit">Request changes</button>
+          </form>
+          <form method="post" action="/app/claims/{{ claim.id }}/reject">
+            <button class="btn btn-danger" type="submit">Reject</button>
+          </form>
         {% endif %}
       </div>
     </div>
-    <div class="panel-body">
-      <div class="grid">
-        <div class="panel" style="box-shadow:none;">
-          <div class="panel-body">
-            <h2 class="title" style="font-size: 14px;">Claim details</h2>
-            <form method="post" action="/app/claims/{{ claim.id }}/update">
-              <div style="margin-top: 10px;">
-                <label>Travel start date</label>
-                <input type="date" name="travel_start_date" value="{{ claim.travel_start_date or '' }}" />
-              </div>
-              <div style="margin-top: 10px;">
-                <label>Travel end date</label>
-                <input type="date" name="travel_end_date" value="{{ claim.travel_end_date or '' }}" />
-              </div>
-              <div style="margin-top: 10px;">
-                <label>Purpose</label>
-                <textarea name="purpose">{{ claim.purpose or '' }}</textarea>
-              </div>
-              <div style="margin-top: 10px;" class="btn-row">
-                <button class="btn" type="submit">Save</button>
-              </div>
-            </form>
-          </div>
-        </div>
+  </div>
 
-        <div class="panel" style="box-shadow:none;">
-          <div class="panel-body">
-            <h2 class="title" style="font-size: 14px;">Upload documents</h2>
-            <form method="post" action="/app/claims/{{ claim.id }}/upload" enctype="multipart/form-data">
-              <div style="margin-top: 10px;">
-                <input type="file" name="upload" required />
-              </div>
-              <div style="margin-top: 10px;" class="btn-row">
-                <button class="btn" type="submit">Upload & extract</button>
-              </div>
-            </form>
-            <div style="margin-top: 12px;">
-              <table class="table">
-                <thead>
-                  <tr><th>File</th><th>Status</th><th>SHA</th></tr>
-                </thead>
-                <tbody>
-                  {% for d in docs %}
-                    <tr>
-                      <td class="muted"><a href="/app/documents/{{ d.id }}/download">{{ d.filename }}</a></td>
-                      <td class="muted">{{ d.status.value }}</td>
-                      <td class="muted" style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">{{ d.sha256[:10] }}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
+  <div class="grid">
+    <!-- Claim Details -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="section-title mb-0">Claim Details</h2>
       </div>
-
-      <div class="grid" style="margin-top: 14px;">
-        <div class="panel" style="box-shadow:none;">
-          <div class="panel-body">
-            <h2 class="title" style="font-size: 14px;">Tasks</h2>
-            {% if tasks|length == 0 %}
-              <div class="callout">No tasks.</div>
-            {% else %}
-              <table class="table">
-                <thead><tr><th>Status</th><th>Type</th><th>Title</th><th></th></tr></thead>
-                <tbody>
-                  {% for t in tasks %}
-                    <tr>
-                      <td class="muted">{{ t.status.value }}</td>
-                      <td class="muted">{{ t.type }}</td>
-                      <td>{{ t.title }}</td>
-                      <td>
-                        {% if t.status.value == 'OPEN' %}
-                          <form method="post" action="/app/tasks/{{ t.id }}/resolve">
-                            <input type="hidden" name="claim_id" value="{{ claim.id }}" />
-                            <button class="btn btn-ghost" type="submit">Resolve</button>
-                          </form>
-                        {% endif %}
-                      </td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            {% endif %}
-            <div class="callout" style="margin-top: 10px;">
-              Set FX rates for USD/CAD if you want reimbursement totals in {{ claim.home_currency }}.
-            </div>
-            <form method="post" action="/app/claims/{{ claim.id }}/fx" style="margin-top: 10px;">
-              <div class="grid" style="grid-template-columns: 1fr 1fr;">
-                <div>
-                  <label>USD → {{ claim.home_currency }}</label>
-                  <input name="usd_to_home" placeholder="e.g. 1.35" />
-                </div>
-                <div>
-                  <label>CAD → {{ claim.home_currency }}</label>
-                  <input name="cad_to_home" placeholder="e.g. 1.00" />
-                </div>
-              </div>
-              <div class="btn-row" style="margin-top: 10px;">
-                <button class="btn btn-ghost" type="submit">Save FX rates</button>
-              </div>
-            </form>
+      <div class="card-body">
+        <form method="post" action="/app/claims/{{ claim.id }}/update">
+          <div class="form-group">
+            <label>Travel start date</label>
+            <input type="date" name="travel_start_date" value="{{ claim.travel_start_date or '' }}" />
           </div>
-        </div>
-
-        <div class="panel" style="box-shadow:none;">
-          <div class="panel-body">
-            <h2 class="title" style="font-size: 14px;">Policy</h2>
-            {% if violations|length == 0 %}
-              <div class="callout">No policy results yet.</div>
-            {% else %}
-              <table class="table">
-                <thead><tr><th>Status</th><th>Rule</th><th>Severity</th><th>Title</th></tr></thead>
-                <tbody>
-                  {% for v in violations %}
-                    <tr>
-                      <td class="muted">{{ v.status.value }}</td>
-                      <td class="muted">{{ v.rule_id }}</td>
-                      <td class="muted">{{ v.severity.value }}</td>
-                      <td>{{ v.title }}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            {% endif %}
+          <div class="form-group">
+            <label>Travel end date</label>
+            <input type="date" name="travel_end_date" value="{{ claim.travel_end_date or '' }}" />
           </div>
-        </div>
+          <div class="form-group">
+            <label>Purpose</label>
+            <textarea name="purpose" placeholder="Describe the purpose of this trip...">{{ claim.purpose or '' }}</textarea>
+          </div>
+          <button class="btn btn-primary" type="submit">Save details</button>
+        </form>
       </div>
+    </div>
 
-      <div class="panel" style="margin-top: 14px; box-shadow:none;">
-        <div class="panel-body">
-          <h2 class="title" style="font-size: 14px;">Expense items</h2>
-          {% if items|length == 0 %}
-            <div class="callout">No items yet. Upload a PDF to extract receipts.</div>
-          {% else %}
-            <table class="table">
-              <thead>
+    <!-- Upload Documents -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="section-title mb-0">Documents</h2>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/app/claims/{{ claim.id }}/upload" enctype="multipart/form-data">
+          <div class="form-group">
+            <label>Upload receipts</label>
+            <input type="file" name="upload" required />
+          </div>
+          <button class="btn btn-accent" type="submit">Upload & extract</button>
+        </form>
+        
+        {% if docs|length > 0 %}
+        <div class="mt-2">
+          <table class="table">
+            <thead>
+              <tr><th>File</th><th>Status</th><th>SHA</th></tr>
+            </thead>
+            <tbody>
+              {% for d in docs %}
                 <tr>
-                  <th>Date</th>
-                  <th>Vendor</th>
-                  <th>Description</th>
-                  <th>Original</th>
-                  <th>{{ claim.home_currency }}</th>
+                  <td><a href="/app/documents/{{ d.id }}/download">{{ d.filename }}</a></td>
+                  <td>
+                    {% if d.status.value == 'PROCESSED' %}
+                      <span class="pill ok">{{ d.status.value }}</span>
+                    {% elif d.status.value == 'FAILED' %}
+                      <span class="pill bad">{{ d.status.value }}</span>
+                    {% else %}
+                      <span class="pill">{{ d.status.value }}</span>
+                    {% endif %}
+                  </td>
+                  <td class="mono muted">{{ d.sha256[:12] }}…</td>
                 </tr>
-              </thead>
-              <tbody>
-                {% for i in items %}
-                  <tr>
-                    <td class="muted">{{ i.transaction_date or '—' }}</td>
-                    <td class="muted">{{ i.vendor }}</td>
-                    <td>{{ i.description or '—' }}</td>
-                    <td class="muted">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</td>
-                    <td class="muted">
-                      {% if i.amount_home_amount is not none %}
-                        {{ claim.home_currency }} {{ '%.2f'|format(i.amount_home_amount) }}
-                      {% else %}
-                        —
-                      {% endif %}
-                    </td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          {% endif %}
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
+        {% endif %}
       </div>
+    </div>
+  </div>
 
-      <div class="panel" style="margin-top: 14px; box-shadow:none;">
-        <div class="panel-body">
-            <h2 class="title" style="font-size: 14px;">Exports</h2>
-          {% if exports|length == 0 %}
-            <div class="callout">No exports yet.</div>
-          {% else %}
-            <table class="table">
-              <thead><tr><th>Status</th><th>Created</th><th>Artifacts</th></tr></thead>
-              <tbody>
-                {% for e in exports %}
-                  <tr>
-                    <td class="muted">{{ e.status.value }}</td>
-                    <td class="muted">{{ e.created_at }}</td>
-                    <td class="muted">
-                      {% if e.summary_xlsx_key %}
-                        <a class="pill" href="/app/exports/{{ e.id }}/download/summary">summary.xlsx</a>
-                      {% endif %}
-                      {% if e.supporting_zip_key %}
-                        <a class="pill" href="/app/exports/{{ e.id }}/download/supporting">supporting.zip</a>
-                      {% endif %}
-                    </td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          {% endif %}
-        </div>
+  <div class="grid mt-2">
+    <!-- Tasks -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="section-title mb-0">Tasks</h2>
       </div>
+      <div class="card-body">
+        {% if tasks|length == 0 %}
+          <div class="callout">No tasks. Upload documents to generate policy checks.</div>
+        {% else %}
+          <table class="table">
+            <thead><tr><th>Status</th><th>Type</th><th>Title</th><th></th></tr></thead>
+            <tbody>
+              {% for t in tasks %}
+                <tr>
+                  <td>
+                    {% if t.status.value == 'RESOLVED' %}
+                      <span class="pill ok">{{ t.status.value }}</span>
+                    {% else %}
+                      <span class="pill warn">{{ t.status.value }}</span>
+                    {% endif %}
+                  </td>
+                  <td class="muted">{{ t.type }}</td>
+                  <td>{{ t.title }}</td>
+                  <td class="text-right">
+                    {% if t.status.value == 'OPEN' %}
+                      <form method="post" action="/app/tasks/{{ t.id }}/resolve">
+                        <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                        <button class="btn btn-sm" type="submit">Resolve</button>
+                      </form>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+        
+        <div class="callout mt-2">
+          Set FX rates to convert amounts to {{ claim.home_currency }}.
+        </div>
+        <form method="post" action="/app/claims/{{ claim.id }}/fx" class="mt-2">
+          <div class="grid" style="grid-template-columns: 1fr 1fr;">
+            <div class="form-group mb-0">
+              <label>USD → {{ claim.home_currency }}</label>
+              <input name="usd_to_home" placeholder="e.g. 1.35" />
+            </div>
+            <div class="form-group mb-0">
+              <label>CAD → {{ claim.home_currency }}</label>
+              <input name="cad_to_home" placeholder="e.g. 1.00" />
+            </div>
+          </div>
+          <button class="btn mt-2" type="submit">Save FX rates</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Policy -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="section-title mb-0">Policy</h2>
+      </div>
+      <div class="card-body">
+        {% if violations|length == 0 %}
+          <div class="callout">No policy results yet.</div>
+        {% else %}
+          <table class="table">
+            <thead><tr><th>Status</th><th>Rule</th><th>Severity</th><th>Title</th></tr></thead>
+            <tbody>
+              {% for v in violations %}
+                <tr>
+                  <td>
+                    {% if v.status.value == 'RESOLVED' %}
+                      <span class="pill ok">{{ v.status.value }}</span>
+                    {% else %}
+                      <span class="pill">{{ v.status.value }}</span>
+                    {% endif %}
+                  </td>
+                  <td class="mono muted">{{ v.rule_id }}</td>
+                  <td>
+                    {% if v.severity.value == 'ERROR' %}
+                      <span class="pill bad">{{ v.severity.value }}</span>
+                    {% elif v.severity.value == 'WARNING' %}
+                      <span class="pill warn">{{ v.severity.value }}</span>
+                    {% else %}
+                      <span class="pill">{{ v.severity.value }}</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ v.title }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Expense Items -->
+  <div class="card mt-2">
+    <div class="card-header">
+      <h2 class="section-title mb-0">Expense Items</h2>
+    </div>
+    <div class="card-body">
+      {% if items|length == 0 %}
+        <div class="callout">No items yet. Upload a PDF to extract receipts.</div>
+      {% else %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Vendor</th>
+              <th>Description</th>
+              <th class="text-right">Original</th>
+              <th class="text-right">{{ claim.home_currency }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for i in items %}
+              <tr>
+                <td class="muted">{{ i.transaction_date or '—' }}</td>
+                <td>{{ i.vendor }}</td>
+                <td class="muted">{{ i.description or '—' }}</td>
+                <td class="text-right mono">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</td>
+                <td class="text-right mono">
+                  {% if i.amount_home_amount is not none %}
+                    {{ claim.home_currency }} {{ '%.2f'|format(i.amount_home_amount) }}
+                  {% else %}
+                    <span class="muted">—</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Exports -->
+  <div class="card mt-2">
+    <div class="card-header">
+      <h2 class="section-title mb-0">Exports</h2>
+    </div>
+    <div class="card-body">
+      {% if exports|length == 0 %}
+        <div class="callout">No exports yet. Click "Generate export" to create one.</div>
+      {% else %}
+        <table class="table">
+          <thead><tr><th>Status</th><th>Created</th><th>Download</th></tr></thead>
+          <tbody>
+            {% for e in exports %}
+              <tr>
+                <td>
+                  {% if e.status.value == 'COMPLETED' %}
+                    <span class="pill ok">{{ e.status.value }}</span>
+                  {% elif e.status.value == 'FAILED' %}
+                    <span class="pill bad">{{ e.status.value }}</span>
+                  {% else %}
+                    <span class="pill">{{ e.status.value }}</span>
+                  {% endif %}
+                </td>
+                <td class="muted">{{ e.created_at }}</td>
+                <td>
+                  {% if e.summary_xlsx_key %}
+                    <a class="btn btn-sm" href="/app/exports/{{ e.id }}/download/summary">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                      </svg>
+                      summary.xlsx
+                    </a>
+                  {% endif %}
+                  {% if e.supporting_zip_key %}
+                    <a class="btn btn-sm" href="/app/exports/{{ e.id }}/download/supporting" style="margin-left: 4px;">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                      </svg>
+                      supporting.zip
+                    </a>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
     </div>
   </div>
 {% endblock %}
