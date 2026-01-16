@@ -33,6 +33,7 @@ src/serendipity_spend/modules/exports/api.py
 src/serendipity_spend/modules/exports/models.py
 src/serendipity_spend/modules/exports/schemas.py
 src/serendipity_spend/modules/exports/service.py
+src/serendipity_spend/modules/extraction/ai.py
 src/serendipity_spend/modules/extraction/service.py
 src/serendipity_spend/modules/extraction/parsers/__init__.py
 src/serendipity_spend/modules/extraction/parsers/baggage_fee.py
@@ -49,6 +50,7 @@ src/serendipity_spend/modules/identity/models.py
 src/serendipity_spend/modules/identity/schemas.py
 src/serendipity_spend/modules/identity/service.py
 src/serendipity_spend/modules/policy/api.py
+src/serendipity_spend/modules/policy/blocking.py
 src/serendipity_spend/modules/policy/models.py
 src/serendipity_spend/modules/policy/schemas.py
 src/serendipity_spend/modules/policy/service.py
@@ -68,4 +70,5 @@ tests/test_extraction_ocr_fallback.py
 tests/test_fx_auto_fetch.py
 tests/test_google_oauth_domain_restriction.py
 tests/test_policy_additional_rules.py
+tests/test_policy_exception_workflow.py
 tests/test_ui_policy_summary.py

@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.identity.models import User, UserRole
-from serendipity_spend.modules.policy.models import PolicySeverity, PolicyViolation, ViolationStatus
+from serendipity_spend.modules.policy.blocking import is_violation_blocking
+from serendipity_spend.modules.policy.models import PolicyViolation, ViolationStatus
 
 
 def create_claim(session: Session, *, employee_id: uuid.UUID, home_currency: str) -> Claim:
@@ -99,6 +100,9 @@ def route_claim(session: Session, *, claim: Claim, approver_id: uuid.UUID) -> Cl
     session.add(claim)
     session.commit()
     session.refresh(claim)
+    from serendipity_spend.modules.policy.service import evaluate_claim
+
+    evaluate_claim(session, claim_id=claim.id)
     return claim
 
 
@@ -106,9 +110,14 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
     if user.role != UserRole.ADMIN and claim.employee_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
 
-    if claim.status not in (ClaimStatus.DRAFT, ClaimStatus.PROCESSING):
+    if claim.status not in (
+        ClaimStatus.DRAFT,
+        ClaimStatus.PROCESSING,
+        ClaimStatus.NEEDS_EMPLOYEE_REVIEW,
+    ):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Only draft or processing claims can be deleted"
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only draft, processing, or needs-review claims can be deleted",
         )
 
     # Delete related records first (foreign key constraints)
@@ -177,7 +186,7 @@ def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
     blocking = [
         v
         for v in open_violations
-        if v.severity == PolicySeverity.FAIL or bool((v.data_json or {}).get("submit_blocking"))
+        if is_violation_blocking(v, allow_pending_exceptions=True)
     ]
     if blocking:
         claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
@@ -228,5 +237,10 @@ def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
 
     session.add(claim)
     session.commit()
+    session.refresh(claim)
+
+    # Re-evaluate after routing so policy tasks can be assigned to approver
+    # (e.g. exception requests).
+    evaluate_claim(session, claim_id=claim.id)
     session.refresh(claim)
     return claim

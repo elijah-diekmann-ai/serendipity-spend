@@ -4,10 +4,14 @@ from fastapi.testclient import TestClient
 
 
 def test_claim_detail_renders_policy_summary() -> None:
+    from datetime import date
+    from decimal import Decimal
+
     from serendipity_spend.core.db import SessionLocal
     from serendipity_spend.core.security import create_access_token, hash_password
     from serendipity_spend.main import create_app
-    from serendipity_spend.modules.claims.service import create_claim
+    from serendipity_spend.modules.claims.service import create_claim, update_claim
+    from serendipity_spend.modules.expenses.service import create_manual_item
     from serendipity_spend.modules.identity.models import User, UserRole
     from serendipity_spend.modules.policy.service import evaluate_claim
 
@@ -24,6 +28,26 @@ def test_claim_detail_renders_policy_summary() -> None:
         session.refresh(user)
 
         claim = create_claim(session, employee_id=user.id, home_currency="SGD")
+        update_claim(
+            session,
+            claim=claim,
+            user=user,
+            travel_start_date=date(2026, 1, 1),
+            travel_end_date=date(2026, 1, 2),
+            purpose="Work trip",
+        )
+        create_manual_item(
+            session,
+            claim=claim,
+            user=user,
+            vendor="Example",
+            category="other",
+            description="Auto-extracted example",
+            transaction_date=date(2026, 1, 1),
+            amount_original_amount=Decimal("10.00"),
+            amount_original_currency="USD",
+            metadata_json={"extraction_method": "generic_page", "employee_reviewed": False},
+        )
         evaluate_claim(session, claim_id=claim.id)
 
         user_id = user.id
@@ -37,6 +61,5 @@ def test_claim_detail_renders_policy_summary() -> None:
         resp = client.get(f"/app/claims/{claim_id}")
         assert resp.status_code == 200
         assert "Policy checks" in resp.text
-        assert "R001" in resp.text
+        assert "R040" in resp.text
         assert "Mark done" in resp.text
-

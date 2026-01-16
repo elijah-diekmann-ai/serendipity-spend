@@ -21,6 +21,7 @@ from serendipity_spend.modules.documents.models import (
     SourceFileStatus,
 )
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
+from serendipity_spend.modules.extraction.ai import extract_policy_fields
 from serendipity_spend.modules.extraction.parsers.baggage_fee import (
     parse_baggage_fee_payment_receipt,
 )
@@ -203,22 +204,28 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
     vendor, receipt_type, confidence = _classify_text(text)
     text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
+    parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    if not parsed:
+        parsed = _parse_generic_receipt(text)
+    if parsed:
+        if vendor == "Unknown":
+            vendor = parsed.vendor
+        if receipt_type == "unknown":
+            receipt_type = parsed.receipt_type
+        confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
+
     evidence = EvidenceDocument(
         source_file_id=source.id,
         page_start=None,
         page_end=None,
-        vendor=vendor,
-        receipt_type=receipt_type,
+        vendor=vendor if parsed else "Unknown",
+        receipt_type=receipt_type if parsed else "unknown",
         extracted_text=text,
         text_hash=text_hash,
-        classification_confidence=confidence,
+        classification_confidence=confidence if parsed else 0.0,
     )
     session.add(evidence)
     session.flush()
-
-    parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
-    if not parsed:
-        parsed = _parse_generic_receipt(text)
     if not parsed:
         _sync_extraction_task(
             session=session,
@@ -493,6 +500,7 @@ def _parse_single_text(*, vendor: str, receipt_type: str, text: str):
     if vendor == "Airline" and receipt_type == "payment_receipt":
         return parse_baggage_fee_payment_receipt(text)
     return None
+
 
 def _dedupe_key(vendor: str, vendor_reference: str | None, text_hash: str) -> str:
     if vendor_reference:
@@ -878,7 +886,19 @@ def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
     tx_date = _extract_any_date(text)
     vendor = _extract_vendor_name(text) or "Unknown"
     category = _guess_category(text)
-    nights = _extract_hotel_nights(text) if category == "lodging" else None
+
+    metadata: dict = {
+        "extraction_family": "generic",
+        "extraction_method": extraction_method,
+        "extraction_confidence": 0.3,
+        "employee_reviewed": False,
+    }
+
+    inferred_category, policy_metadata = _infer_policy_fields(text=text, category_hint=category)
+    if not category and inferred_category:
+        category = inferred_category
+    metadata.update(policy_metadata)
+
     return _GenericParsedExpense(
         vendor=vendor,
         vendor_reference=None,
@@ -888,13 +908,7 @@ def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
         transaction_date=tx_date,
         amount=amount,
         currency=currency,
-        metadata={
-            "extraction_family": "generic",
-            "extraction_method": extraction_method,
-            "extraction_confidence": 0.3,
-            "employee_reviewed": False,
-            **({"hotel_nights": nights} if nights else {}),
-        },
+        metadata=metadata,
     )
 
 
@@ -913,10 +927,325 @@ class _GenericParsedExpense:
 
 def _guess_category(text: str) -> str | None:
     t = text.lower()
-    if any(k in t for k in ("hotel", "room rate", "check-in", "check in", "check-out", "folio")):
-        return "lodging"
-    if any(k in t for k in ("flight", "boarding pass", "itinerary", "e-ticket", "ticket number")):
-        return "airfare"
+
+    lodging_strong = ("check-in", "check in", "check-out", "check out", "folio", "room rate")
+    airfare_strong = (
+        "boarding pass",
+        "e-ticket",
+        "eticket",
+        "ticket number",
+        "pnr",
+        "itinerary",
+        "flight number",
+        "gate",
+        "terminal",
+        "seat",
+    )
+    meals_strong = ("gratuity", "tip", "server", "table", "covers", "pax", "guests")
+
+    scores = {"lodging": 0, "airfare": 0, "meals": 0}
+
+    if any(k in t for k in lodging_strong) or "hotel" in t:
+        scores["lodging"] += 2
+    if any(k in t for k in airfare_strong) or "flight" in t:
+        scores["airfare"] += 2
+    if any(k in t for k in meals_strong) or any(k in t for k in ("restaurant", "cafe", "bar")):
+        scores["meals"] += 2
+
+    # Softer signals
+    for k in ("reservation", "stay", "room", "nights"):
+        if k in t:
+            scores["lodging"] += 1
+    for k in ("depart", "departure", "arrive", "arrival", "airline", "fare"):
+        if k in t:
+            scores["airfare"] += 1
+    for k in ("subtotal", "tax", "dine", "dining", "beverage"):
+        if k in t:
+            scores["meals"] += 1
+
+    best = max(scores, key=scores.get)
+    if scores[best] < 2:
+        return None
+
+    # Avoid ambiguous ties (e.g., itinerary emails can mention "arrival"/"departure" for hotels).
+    top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    if len(top) >= 2 and top[0][1] == top[1][1]:
+        return None
+    return best
+
+
+def _infer_policy_fields(*, text: str, category_hint: str | None) -> tuple[str | None, dict]:
+    inferred_category = category_hint
+    metadata: dict = {}
+
+    if inferred_category in {None, "lodging"}:
+        check_in, check_out = _extract_hotel_stay_dates(text)
+        nights = _extract_hotel_nights(text)
+        if nights is None and check_in and check_out and check_out > check_in:
+            computed = (check_out - check_in).days
+            if 1 <= computed <= 60:
+                nights = computed
+        if nights:
+            metadata["hotel_nights"] = nights
+            inferred_category = inferred_category or "lodging"
+        if check_in:
+            metadata["hotel_check_in"] = check_in.isoformat()
+        if check_out:
+            metadata["hotel_check_out"] = check_out.isoformat()
+
+    if inferred_category in {None, "airfare"}:
+        duration = _extract_flight_duration_hours(text)
+        cabin = _extract_flight_cabin_class(text)
+        if duration is not None:
+            metadata["flight_duration_hours"] = duration
+            inferred_category = inferred_category or "airfare"
+        if cabin:
+            metadata["flight_cabin_class"] = cabin
+            inferred_category = inferred_category or "airfare"
+
+    if inferred_category in {None, "meals"}:
+        attendees = _extract_meal_attendees(text)
+        if attendees is not None:
+            metadata["attendees"] = attendees
+            inferred_category = inferred_category or "meals"
+
+    # Optional AI enrichment (fills missing policy fields + category)
+    ai = extract_policy_fields(text)
+    if ai:
+        ai_cat = ai.get("category")
+        if isinstance(ai_cat, str) and not inferred_category:
+            inferred_category = ai_cat
+
+        if inferred_category == "lodging" and not metadata.get("hotel_nights"):
+            nights = ai.get("hotel_nights")
+            if isinstance(nights, int) and 1 <= nights <= 60:
+                metadata["hotel_nights"] = nights
+
+        if inferred_category == "airfare":
+            if metadata.get("flight_duration_hours") is None:
+                duration = ai.get("flight_duration_hours")
+                if isinstance(duration, (int, float)) and 0.1 <= float(duration) <= 30:
+                    metadata["flight_duration_hours"] = round(float(duration), 2)
+            if not metadata.get("flight_cabin_class"):
+                cabin = ai.get("flight_cabin_class")
+                if isinstance(cabin, str) and cabin.strip():
+                    metadata["flight_cabin_class"] = cabin.strip().lower()
+
+        if inferred_category == "meals" and metadata.get("attendees") in {None, ""}:
+            attendees = ai.get("attendees")
+            if isinstance(attendees, int) and 1 <= attendees <= 50:
+                metadata["attendees"] = attendees
+            elif isinstance(attendees, str) and attendees.strip():
+                metadata["attendees"] = attendees.strip()[:200]
+
+        if "confidence" in ai:
+            metadata["policy_fields_confidence"] = ai.get("confidence")
+
+    return inferred_category, metadata
+
+
+_DATE_PATTERNS = (
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}",  # 2026-01-16
+    r"[0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4}",  # 16 Jan 2026
+    r"[A-Za-z]{3,9}\s+[0-9]{1,2},\s*[0-9]{4}",  # Jan 16, 2026
+    r"[0-9]{2}[A-Za-z]{3}[0-9]{2}",  # 31AUG25
+    r"[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}",  # 1/16/2026
+)
+_DATE_RE = re.compile(r"\b(" + "|".join(_DATE_PATTERNS) + r")\b")
+
+
+def _extract_hotel_stay_dates(text: str) -> tuple[date | None, date | None]:
+    t = text.replace("\u202f", " ").replace("\xa0", " ")
+    check_in = _extract_date_near_keywords(
+        t,
+        keywords=(
+            "check-in",
+            "check in",
+            "arrival",
+            "arrival date",
+        ),
+    )
+    check_out = _extract_date_near_keywords(
+        t,
+        keywords=(
+            "check-out",
+            "check out",
+            "departure",
+            "departure date",
+        ),
+    )
+
+    if check_in and check_out:
+        return check_in, check_out
+
+    # "Stay: 2026-01-15 - 2026-01-17"
+    m = re.search(
+        r"(?i)\b(stay|dates)\b[^\n]{0,80}?\b(" + _DATE_RE.pattern + r")\b[^\n]{0,10}?"
+        r"(?:-|–|—|to|until|through)\s*\b(" + _DATE_RE.pattern + r")\b",
+        t,
+    )
+    if m:
+        d1 = _parse_date_any(m.group(2))
+        d2 = _parse_date_any(m.group(4))
+        if d1 and d2:
+            return d1, d2
+
+    return check_in, check_out
+
+
+def _extract_date_near_keywords(text: str, *, keywords: tuple[str, ...]) -> date | None:
+    for kw in keywords:
+        m = re.search(rf"(?i)\b{re.escape(kw)}\b[^\n]{{0,40}}{_DATE_RE.pattern}", text)
+        if not m:
+            continue
+        candidate = m.group(1)
+        parsed = _parse_date_any(candidate)
+        if parsed:
+            return parsed
+    return None
+
+
+def _parse_date_any(s: str | None) -> date | None:
+    if not s:
+        return None
+    raw = str(s).strip()
+    # ISO
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        pass
+    # 05 Sep 2025 / 05 September 2025
+    for fmt in ("%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    # Sep 05, 2025 / September 5, 2025
+    for fmt in ("%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    # 31AUG25
+    try:
+        return datetime.strptime(raw.title(), "%d%b%y").date()
+    except ValueError:
+        pass
+    # 12/31/2025 or 31/12/2025 (prefer unambiguous)
+    m = re.fullmatch(r"([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})", raw)
+    if m:
+        a, b = (int(m.group(1)), int(m.group(2)))
+        for fmt, ok in (
+            ("%m/%d/%Y", a <= 12 and b <= 31),
+            ("%d/%m/%Y", b <= 12 and a <= 31),
+        ):
+            if not ok:
+                continue
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _extract_flight_duration_hours(text: str) -> float | None:
+    keywords = ("duration", "flight time", "journey time", "total time", "elapsed time")
+    exclude = ("layover", "connection", "stopover")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    candidates: list[float] = []
+    for ln in lines:
+        lnl = ln.lower()
+        if not any(k in lnl for k in keywords):
+            continue
+        if any(b in lnl for b in exclude):
+            continue
+
+        # 5h 30m / 5 hr 30 min
+        m = re.search(
+            r"\b([0-9]{1,2})\s*(?:h|hr|hrs|hour|hours)\s*([0-9]{1,2})\s*(?:m|min|mins|minute|minutes)\b",
+            lnl,
+        )
+        if m:
+            h, mins = int(m.group(1)), int(m.group(2))
+            candidates.append(round(h + mins / 60.0, 2))
+            continue
+
+        # 05:30
+        m = re.search(r"\b([0-9]{1,2}):([0-9]{2})\b", lnl)
+        if m:
+            h, mins = int(m.group(1)), int(m.group(2))
+            if 0 <= mins < 60:
+                candidates.append(round(h + mins / 60.0, 2))
+            continue
+
+        # 5.5 hours / 5 hours
+        m = re.search(r"\b([0-9]{1,2}(?:\.[0-9]+)?)\s*(?:h|hr|hrs|hour|hours)\b", lnl)
+        if m:
+            try:
+                candidates.append(round(float(m.group(1)), 2))
+            except Exception:
+                pass
+
+    if not candidates:
+        return None
+
+    best = max(candidates)
+    if not (0.1 <= best <= 30):
+        return None
+    return best
+
+
+def _extract_flight_cabin_class(text: str) -> str | None:
+    t = text.lower()
+
+    # Look for explicit cabin names first.
+    cabin_keywords: list[tuple[str, tuple[str, ...]]] = [
+        ("premium_economy", ("premium economy", "economy plus", "comfort+", "extra legroom")),
+        ("business", ("business class", "business", "club world", "club", "executive")),
+        ("first", ("first class", "first")),
+        ("economy", ("economy class", "economy", "coach", "main cabin")),
+    ]
+    for cabin, kws in cabin_keywords:
+        if any(kw in t for kw in kws):
+            return cabin
+
+    # Cabin/Class: Y/J/F mapping (only when explicitly labeled).
+    m = re.search(r"(?i)\b(cabin|class|booking class|fare class)\b\s*[:#]?\s*([A-Z])\b", text)
+    if m:
+        code = m.group(2).upper()
+        if code in {"F", "A", "P"}:
+            return "first"
+        if code in {"J", "C", "D", "I", "Z", "R"}:
+            return "business"
+        if code in {"W"}:
+            return "premium_economy"
+        if code in {"Y", "B", "M", "H", "K", "L", "Q", "V", "S", "T", "U", "X"}:
+            return "economy"
+
+    return None
+
+
+def _extract_meal_attendees(text: str) -> int | None:
+    t = text.lower()
+    if not any(k in t for k in ("guests", "guest", "covers", "pax", "party of", "people")):
+        return None
+
+    patterns = (
+        r"\b(?:guests?|covers|pax|people|persons?)\s*[:#]?\s*([0-9]{1,2})\b",
+        r"\b([0-9]{1,2})\s*(?:guests?|covers|pax|people|persons?)\b",
+        r"\bparty\s+of\s+([0-9]{1,2})\b",
+    )
+    for pat in patterns:
+        m = re.search(pat, t, re.I)
+        if not m:
+            continue
+        try:
+            n = int(m.group(1))
+        except Exception:
+            continue
+        if 1 <= n <= 50:
+            return n
     return None
 
 

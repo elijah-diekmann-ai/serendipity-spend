@@ -37,6 +37,61 @@ def test_parse_generic_receipt_extracts_total_and_date():
     assert parsed_variant.metadata.get("extraction_method") == "generic_page"
 
 
+def test_parse_generic_receipt_extracts_hotel_nights_from_check_in_out():
+    from serendipity_spend.modules.extraction.service import _parse_generic_receipt
+
+    parsed = _parse_generic_receipt(
+        "Example Hotel\nCheck-in: 2026-01-05\nCheck-out: 2026-01-08\nTotal USD 900.00\n"
+    )
+    assert parsed is not None
+    assert parsed.category == "lodging"
+    assert parsed.metadata.get("hotel_nights") == 3
+
+
+def test_parse_generic_receipt_extracts_flight_duration_and_cabin():
+    from serendipity_spend.modules.extraction.service import _parse_generic_receipt
+
+    parsed = _parse_generic_receipt(
+        "Airline Receipt\nItinerary\nDuration: 5h 30m\nCabin: Business\nTotal USD 200.00\n"
+    )
+    assert parsed is not None
+    assert parsed.category == "airfare"
+    assert parsed.metadata.get("flight_duration_hours") == 5.5
+    assert parsed.metadata.get("flight_cabin_class") == "business"
+
+
+def test_parse_generic_receipt_extracts_meal_attendees_count():
+    from serendipity_spend.modules.extraction.service import _parse_generic_receipt
+
+    parsed = _parse_generic_receipt(
+        "Restaurant\nGuests: 3\nSubtotal $120.00\nTip $24.00\nTotal USD 144.00\n"
+    )
+    assert parsed is not None
+    assert parsed.category == "meals"
+    assert parsed.metadata.get("attendees") == 3
+
+
+def test_parse_generic_receipt_ai_enrichment_fills_missing_policy_fields(monkeypatch):
+    from serendipity_spend.modules.extraction import service as extraction_service
+
+    monkeypatch.setattr(
+        extraction_service,
+        "extract_policy_fields",
+        lambda _text: {
+            "category": "airfare",
+            "flight_duration_hours": 2.25,
+            "flight_cabin_class": "economy",
+            "confidence": 0.9,
+        },
+    )
+
+    parsed = extraction_service._parse_generic_receipt("Some receipt\nTotal USD 100.00\n")
+    assert parsed is not None
+    assert parsed.category == "airfare"
+    assert parsed.metadata.get("flight_duration_hours") == 2.25
+    assert parsed.metadata.get("flight_cabin_class") == "economy"
+
+
 def test_policy_generic_extraction_variants_require_employee_review():
     with SessionLocal() as session:
         employee = create_user(

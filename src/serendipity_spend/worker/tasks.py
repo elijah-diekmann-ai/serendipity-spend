@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from serendipity_spend.worker.celery_app import celery_app
-
 # Ensure all models are registered before any task runs
+# isort: off
 import serendipity_spend.models  # noqa: F401
+# isort: on
+
+from serendipity_spend.worker.celery_app import celery_app
 
 
 @celery_app.task(name="extract_source_file")

@@ -62,6 +62,16 @@
   {% elif submit_ok %}
     <div class="callout success mb-2">Claim submitted.</div>
   {% endif %}
+  {% if approve_error %}
+    <div class="callout error mb-2">{{ approve_error }}</div>
+  {% elif approve_ok %}
+    <div class="callout success mb-2">Decision saved.</div>
+  {% endif %}
+  {% if policy_error %}
+    <div class="callout error mb-2">{{ policy_error }}</div>
+  {% elif policy_ok %}
+    <div class="callout success mb-2">Policy update saved.</div>
+  {% endif %}
   {% if route_error %}
     <div class="callout error mb-2">{{ route_error }}</div>
   {% elif route_ok %}
@@ -359,6 +369,7 @@
         <div class="step-body">
           <div class="policy-issues">
             {% for v in receipt_violations %}
+                {% set exc = policy_exceptions_by_key.get(v.dedupe_key) %}
                 <div class="policy-issue">
                   <div class="policy-issue-top">
                     <div class="policy-issue-badges">
@@ -375,6 +386,15 @@
                         <span class="pill bad">Blocks submit</span>
                       {% endif %}
                       <span class="pill">{{ v.rule_id }}</span>
+                      {% if v.rule_id in ['R103','R123'] and exc %}
+                        {% if exc.status.value == 'REQUESTED' %}
+                          <span class="pill warn">Exception requested</span>
+                        {% elif exc.status.value == 'APPROVED' %}
+                          <span class="pill ok">Exception approved</span>
+                        {% elif exc.status.value == 'REJECTED' %}
+                          <span class="pill bad">Exception rejected</span>
+                        {% endif %}
+                      {% endif %}
                     </div>
                     <div class="policy-issue-actions">
                       {% if v.expense_item_id %}
@@ -391,6 +411,37 @@
                   </div>
                   <div class="policy-issue-title">{{ v.title }}</div>
                   <div class="muted">{{ v.message }}</div>
+                  {% if v.rule_id in ['R103','R123'] and exc %}
+                    <div class="muted mt-1"><strong>Justification:</strong> {{ exc.justification }}</div>
+                    {% if exc.decision_comment %}
+                      <div class="muted mt-1"><strong>Decision note:</strong> {{ exc.decision_comment }}</div>
+                    {% endif %}
+                  {% endif %}
+                  {% if v.rule_id in ['R103','R123'] and (user.role.value == 'ADMIN' or user.id == claim.employee_id) and claim.status.value not in ['APPROVED','REJECTED','PAID'] %}
+                    {% if not exc or exc.status.value == 'REJECTED' %}
+                      <form method="post" action="/app/claims/{{ claim.id }}/policy/exceptions/request" class="mt-1">
+                        <input type="hidden" name="violation_id" value="{{ v.id }}" />
+                        <div class="form-field">
+                          <label>Justification</label>
+                          <textarea name="justification" rows="2" required placeholder="Why is this exception needed?"></textarea>
+                        </div>
+                        <button class="btn btn-xs" type="submit">{% if exc and exc.status.value == 'REJECTED' %}Resubmit exception{% else %}Request exception{% endif %}</button>
+                      </form>
+                    {% endif %}
+                  {% endif %}
+                  {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' and exc and exc.status.value == 'REQUESTED' %}
+                    <form method="post" action="/app/policy/exceptions/{{ exc.id }}/decide" class="mt-1">
+                      <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                      <div class="form-field">
+                        <label>Comment (optional)</label>
+                        <input name="comment" placeholder="Optional note for audit / employee" />
+                      </div>
+                      <div class="btn-row">
+                        <button class="btn btn-xs btn-primary" type="submit" name="decision" value="APPROVED">Approve exception</button>
+                        <button class="btn btn-xs" type="submit" name="decision" value="REJECTED">Reject exception</button>
+                      </div>
+                    </form>
+                  {% endif %}
                   {% if v.expense_item_id %}
                     {% set item = items_by_id.get(v.expense_item_id) %}
                     <div class="policy-issue-item mono muted">
@@ -526,7 +577,7 @@
             <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Reject</button>
           </form>
         {% endif %}
-        {% if claim.status.value in ['DRAFT', 'PROCESSING'] %}
+        {% if claim.status.value in ['DRAFT', 'PROCESSING', 'NEEDS_EMPLOYEE_REVIEW'] %}
           <form method="post" action="/app/claims/{{ claim.id }}/delete" onsubmit="return confirm('Delete this claim?');">
             <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Delete claim</button>
           </form>

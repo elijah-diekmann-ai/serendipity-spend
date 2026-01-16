@@ -34,5 +34,14 @@ class Settings(BaseSettings):
 
     access_token_exp_minutes: int = 60 * 24
 
+    # Optional AI-assisted receipt understanding
+    receipt_ai_enabled: bool = False
+    receipt_ai_timeout_seconds: float = 20.0
+    receipt_ai_max_chars: int = 12000
+
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+
 
 settings = Settings()

@@ -18,6 +18,8 @@ from serendipity_spend.modules.documents.models import EvidenceDocument, SourceF
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
 from serendipity_spend.modules.exports.models import ExportRun, ExportStatus
 from serendipity_spend.modules.identity.models import User
+from serendipity_spend.modules.policy.models import PolicyViolation, ViolationStatus
+from serendipity_spend.modules.policy.service import evaluate_claim
 
 
 def create_export_run(*, claim_id: uuid.UUID, requested_by_user_id: uuid.UUID) -> ExportRun:
@@ -62,7 +64,18 @@ def generate_export(*, export_run_id: str) -> None:
                 session.scalars(select(SourceFile).where(SourceFile.claim_id == claim.id))
             )
 
-            xlsx_bytes = _build_reimbursement_xlsx(claim=claim, employee=employee, items=items)
+            evaluate_claim(session, claim_id=claim.id)
+            policy_violations = list(
+                session.scalars(
+                    select(PolicyViolation).where(
+                        PolicyViolation.claim_id == claim.id,
+                        PolicyViolation.status == ViolationStatus.OPEN,
+                    )
+                )
+            )
+            xlsx_bytes = _build_reimbursement_xlsx(
+                claim=claim, employee=employee, items=items, policy_violations=policy_violations
+            )
             pdf_bytes = _build_supporting_pdf(session=session, claim=claim, sources=sources)
 
             summary_key = f"claims/{claim.id}/exports/{run.id}/summary.xlsx"
@@ -86,7 +99,11 @@ def generate_export(*, export_run_id: str) -> None:
 
 
 def _build_reimbursement_xlsx(
-    *, claim: Claim, employee: User | None, items: list[ExpenseItem]
+    *,
+    claim: Claim,
+    employee: User | None,
+    items: list[ExpenseItem],
+    policy_violations: list[PolicyViolation] | None = None,
 ) -> bytes:
     wb = _load_reimbursement_template()
     ws = wb.active
@@ -106,6 +123,15 @@ def _build_reimbursement_xlsx(
     ws["H6"] = claim.home_currency.upper()
 
     currency_col = {"USD": 3, "SGD": 4, "CAD": 5, "GBP": 6}
+    policy_col = 9
+    ws.cell(row=6, column=policy_col, value="Policy flags")
+    ws.column_dimensions["I"].width = 45
+
+    violations_by_item_id: dict[uuid.UUID, list[PolicyViolation]] = {}
+    for v in policy_violations or []:
+        if v.expense_item_id is None:
+            continue
+        violations_by_item_id.setdefault(v.expense_item_id, []).append(v)
 
     data_start_row = 8
     total_row = _find_total_row(ws) or (data_start_row + max(len(items), 1))
@@ -137,6 +163,10 @@ def _build_reimbursement_xlsx(
         if item.amount_home_amount is not None:
             ws.cell(row=row, column=8, value=float(item.amount_home_amount))
 
+        flags = violations_by_item_id.get(item.id) or []
+        if flags:
+            ws.cell(row=row, column=policy_col, value=_format_policy_flags(flags))
+
         row += 1
 
     out = io.BytesIO()
@@ -157,7 +187,17 @@ def _load_reimbursement_template() -> Workbook:
     wb.active["A1"] = "Employee"
     wb.active["A2"] = "Travel period"
     wb.active["A3"] = "Purpose of the trip"
-    headers = ["Date", "Description", "USD", "SGD", "CAD", "GBP", "EX rate", "Reimbursement"]
+    headers = [
+        "Date",
+        "Description",
+        "USD",
+        "SGD",
+        "CAD",
+        "GBP",
+        "EX rate",
+        "Reimbursement",
+        "Policy flags",
+    ]
     for col, value in enumerate(headers, start=1):
         wb.active.cell(row=6, column=col, value=value)
     return wb
@@ -199,6 +239,27 @@ def _update_total_formulas(*, ws, total_row: int, data_start_row: int) -> None:
         cell = ws[f"{col_letter}{total_row}"]
         if isinstance(cell.value, str) and cell.value.startswith("=SUM("):
             cell.value = f"=SUM({col_letter}{data_start_row}:{col_letter}{data_end_row})"
+
+
+def _format_policy_flags(violations: list[PolicyViolation]) -> str:
+    severity_order = {"FAIL": 0, "NEEDS_INFO": 1, "WARN": 2, "PASS": 3}
+
+    def one(v: PolicyViolation) -> str:
+        parts = [v.rule_id, v.severity.value]
+        exc = (v.data_json or {}).get("exception") or {}
+        exc_status = str(exc.get("status") or "").strip()
+        if exc_status:
+            parts.append(f"EXC {exc_status}")
+        elif v.severity.value != "FAIL" and bool((v.data_json or {}).get("submit_blocking")):
+            parts.append("BLOCKS")
+        return f"{' '.join(parts)} - {v.title}"
+
+    return "; ".join(
+        one(v)
+        for v in sorted(
+            violations, key=lambda x: (severity_order.get(x.severity.value, 99), x.rule_id)
+        )
+    )
 
 
 def _build_supporting_pdf(
