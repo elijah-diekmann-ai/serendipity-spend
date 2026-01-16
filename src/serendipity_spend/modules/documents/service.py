@@ -223,17 +223,16 @@ def _unpack_eml_upload(body: bytes) -> list[dict]:
             header_lines.append(sender_hint)
         if subject:
             header_lines.append(f"Subject: {subject}")
-        if email_date_iso:
-            header_lines.append(f"EmailDate: {email_date_iso}")
         if from_header:
             header_lines.append(f"From: {from_header}")
         to_header = str(msg.get("to") or "").strip()
         if to_header:
             header_lines.append(f"To: {to_header}")
 
-        combined = ("\n".join(header_lines) + "\n\n" + body_text.strip() + "\n").encode(
-            "utf-8", errors="replace"
-        )
+        combined_text = "\n".join(header_lines) + "\n\n" + body_text.strip()
+        if email_date_iso:
+            combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
+        combined = (combined_text + "\n").encode("utf-8", errors="replace")
         out.append(
             {
                 "filename": _sanitize_filename(_email_body_filename(subject)) or "email-body.txt",
