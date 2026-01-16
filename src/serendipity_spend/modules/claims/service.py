@@ -82,6 +82,17 @@ def update_claim(session: Session, *, claim: Claim, user: User, **changes) -> Cl
 
 
 def route_claim(session: Session, *, claim: Claim, approver_id: uuid.UUID) -> Claim:
+    approver = session.scalar(select(User).where(User.id == approver_id))
+    if not approver:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approver not found")
+    if not approver.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Approver is inactive"
+        )
+    if approver.role not in {UserRole.APPROVER, UserRole.ADMIN}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="User is not an approver"
+        )
     claim.approver_id = approver_id
     if claim.status == ClaimStatus.SUBMITTED:
         claim.status = ClaimStatus.NEEDS_APPROVER_REVIEW
@@ -191,9 +202,29 @@ def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
         )
 
     claim.submitted_at = datetime.now(UTC)
-    claim.status = ClaimStatus.SUBMITTED
-    if claim.approver_id:
-        claim.status = ClaimStatus.NEEDS_APPROVER_REVIEW
+
+    if not claim.approver_id:
+        approvers = list(
+            session.scalars(
+                select(User)
+                .where(User.role == UserRole.APPROVER, User.is_active.is_(True))
+                .order_by(User.email.asc())
+            )
+        )
+        if len(approvers) == 1:
+            claim.approver_id = approvers[0].id
+        elif len(approvers) == 0:
+            admins = list(
+                session.scalars(
+                    select(User)
+                    .where(User.role == UserRole.ADMIN, User.is_active.is_(True))
+                    .order_by(User.email.asc())
+                )
+            )
+            if len(admins) == 1:
+                claim.approver_id = admins[0].id
+
+    claim.status = ClaimStatus.NEEDS_APPROVER_REVIEW if claim.approver_id else ClaimStatus.SUBMITTED
 
     session.add(claim)
     session.commit()

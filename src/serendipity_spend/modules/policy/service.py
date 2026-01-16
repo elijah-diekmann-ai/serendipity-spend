@@ -27,6 +27,19 @@ class Issue:
     data: dict
 
 
+def _is_generic_extraction(item: ExpenseItem) -> bool:
+    metadata = item.metadata_json or {}
+    family = str(metadata.get("extraction_family") or "").strip().lower()
+    if family == "generic":
+        return True
+
+    method = str(metadata.get("extraction_method") or "").strip().lower()
+    if method.startswith("generic"):
+        return True
+
+    return str(item.receipt_type or "").strip().lower() == "generic_receipt"
+
+
 def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
     claim = session.scalar(select(Claim).where(Claim.id == claim_id))
     if not claim:
@@ -143,9 +156,12 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
 
         # R040: generic extraction requires employee confirmation
         if (
-            str(item.metadata_json.get("extraction_method")) == "generic"
+            _is_generic_extraction(item)
             and not bool(item.metadata_json.get("employee_reviewed"))
         ):
+            metadata = item.metadata_json or {}
+            extraction_family = str(metadata.get("extraction_family") or "").strip() or "generic"
+            extraction_method = str(metadata.get("extraction_method") or "").strip() or "generic"
             issues.append(
                 Issue(
                     dedupe_key=f"item:{item.id}:R040",
@@ -158,7 +174,11 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         "This receipt was parsed using a generic heuristic. "
                         "Review the vendor/date/amount and mark it reviewed."
                     ),
-                    data={"extraction_method": "generic", "submit_blocking": True},
+                    data={
+                        "extraction_family": extraction_family,
+                        "extraction_method": extraction_method,
+                        "submit_blocking": True,
+                    },
                 )
             )
 

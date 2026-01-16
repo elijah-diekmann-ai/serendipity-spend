@@ -25,6 +25,51 @@ def test_parse_generic_receipt_extracts_total_and_date():
     assert parsed.currency == "USD"
     assert parsed.amount == Decimal("650.00")
     assert parsed.transaction_date == date(2026, 1, 5)
+    assert parsed.metadata.get("extraction_family") == "generic"
+    assert parsed.metadata.get("extraction_method") == "generic"
+
+    parsed_variant = _parse_generic_receipt(
+        "Example Hotel\nDate: 2026-01-05\nGrand Total USD 650.00\nThank you",
+        extraction_method="generic_page",
+    )
+    assert parsed_variant is not None
+    assert parsed_variant.metadata.get("extraction_family") == "generic"
+    assert parsed_variant.metadata.get("extraction_method") == "generic_page"
+
+
+def test_policy_generic_extraction_variants_require_employee_review():
+    with SessionLocal() as session:
+        employee = create_user(
+            session, email="employee@example.com", password="pw", role=UserRole.EMPLOYEE
+        )
+        claim = create_claim(session, employee_id=employee.id, home_currency="USD")
+        update_claim(
+            session,
+            claim=claim,
+            user=employee,
+            travel_start_date=date(2026, 1, 1),
+            travel_end_date=date(2026, 1, 2),
+            purpose="Work trip",
+        )
+
+        create_manual_item(
+            session,
+            claim=claim,
+            user=employee,
+            vendor="Example Hotel",
+            category="lodging",
+            description="Hotel stay",
+            transaction_date=date(2026, 1, 1),
+            amount_original_amount=Decimal("650.00"),
+            amount_original_currency="USD",
+            metadata_json={"extraction_method": "generic_page", "employee_reviewed": False},
+        )
+
+        evaluate_claim(session, claim_id=claim.id)
+        violations = list(
+            session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
+        )
+        assert any(v.rule_id == "R040" and v.data_json.get("submit_blocking") for v in violations)
 
 
 def test_policy_hotel_cap_fails_over_300_per_night():
@@ -134,4 +179,3 @@ def test_policy_short_flight_must_be_economy():
             session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
         )
         assert any(v.rule_id == "R123" and v.severity == PolicySeverity.FAIL for v in violations)
-

@@ -52,9 +52,13 @@ from serendipity_spend.modules.identity.google_oauth import (
     google_oauth_enabled,
     verify_google_id_token,
 )
-from serendipity_spend.modules.identity.models import User
+from serendipity_spend.modules.identity.models import User, UserRole
 from serendipity_spend.modules.identity.service import authenticate_user, get_or_create_google_user
-from serendipity_spend.modules.policy.models import PolicyViolation
+from serendipity_spend.modules.policy.models import (
+    PolicySeverity,
+    PolicyViolation,
+    ViolationStatus,
+)
 from serendipity_spend.modules.policy.service import evaluate_claim
 from serendipity_spend.modules.workflow.models import ApprovalDecision, Task, TaskStatus
 from serendipity_spend.modules.workflow.service import approve_claim, list_tasks, resolve_task
@@ -106,6 +110,21 @@ def _get_optional_user(request: Request, session: Session) -> User | None:
     ):
         return None
     return user
+
+
+def _policy_task_key(task: Task) -> str | None:
+    if not task.type.startswith("POLICY_"):
+        return None
+    rule_id = task.type[len("POLICY_") :]
+    if task.expense_item_id:
+        return f"item:{task.expense_item_id}:{rule_id}"
+    return f"claim:{task.claim_id}:{rule_id}"
+
+
+def _is_blocking_violation(v: PolicyViolation) -> bool:
+    if v.severity == PolicySeverity.FAIL:
+        return True
+    return bool((v.data_json or {}).get("submit_blocking"))
 
 
 @router.get("/", response_class=RedirectResponse)
@@ -346,19 +365,33 @@ def inbox_page(request: Request, session: Session = Depends(db_session)) -> HTML
 
     from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 
-    q = (
+    review_q = (
         select(Claim)
         .options(selectinload(Claim.employee))
         .where(Claim.status == ClaimStatus.NEEDS_APPROVER_REVIEW)
         .order_by(Claim.created_at.desc())
     )
+    routing_q = (
+        select(Claim)
+        .options(selectinload(Claim.employee))
+        .where(Claim.status == ClaimStatus.SUBMITTED)
+        .order_by(Claim.created_at.desc())
+    )
     if user.role.value == "APPROVER":
-        q = q.where(Claim.approver_id == user.id)
+        review_q = review_q.where(Claim.approver_id == user.id)
+        routing_claims: list[Claim] = []
+    else:
+        routing_claims = list(session.scalars(routing_q))
 
-    claims = list(session.scalars(q))
+    review_claims = list(session.scalars(review_q))
     return templates.TemplateResponse(
         "inbox.html",
-        {"request": request, "user": user, "claims": claims},
+        {
+            "request": request,
+            "user": user,
+            "review_claims": review_claims,
+            "routing_claims": routing_claims,
+        },
     )
 
 
@@ -375,6 +408,18 @@ def claim_detail(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     docs = list_source_files(session, claim=claim, user=user)
     items = list_items(session, claim_id=claim.id)
+    route_targets: list[User] = []
+    if user.role == UserRole.ADMIN:
+        route_targets = list(
+            session.scalars(
+                select(User)
+                .where(
+                    User.is_active.is_(True),
+                    User.role.in_([UserRole.APPROVER, UserRole.ADMIN]),
+                )
+                .order_by(User.email.asc())
+            )
+        )
 
     fx_values = {
         fx.from_currency: str(fx.rate)
@@ -399,6 +444,52 @@ def claim_detail(
     violations = list(
         session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
     )
+
+    items_by_id = {i.id: i for i in items}
+
+    policy_tasks_by_key: dict[str, Task] = {}
+    for t in tasks:
+        key = _policy_task_key(t)
+        if not key:
+            continue
+        existing = policy_tasks_by_key.get(key)
+        if not existing or t.created_at > existing.created_at:
+            policy_tasks_by_key[key] = t
+
+    open_violations = [v for v in violations if v.status == ViolationStatus.OPEN]
+    resolved_violations = [v for v in violations if v.status == ViolationStatus.RESOLVED]
+
+    severity_rank = {
+        PolicySeverity.FAIL: 0,
+        PolicySeverity.NEEDS_INFO: 1,
+        PolicySeverity.WARN: 2,
+        PolicySeverity.PASS: 3,
+    }
+    open_violations.sort(
+        key=lambda v: (
+            0 if _is_blocking_violation(v) else 1,
+            0 if v.expense_item_id is None else 1,
+            severity_rank.get(v.severity, 99),
+            v.rule_id,
+            v.created_at,
+        )
+    )
+    resolved_violations.sort(key=lambda v: v.resolved_at or v.updated_at, reverse=True)
+
+    violation_counts: dict[str, int] = {}
+    blocking_count = 0
+    for v in open_violations:
+        key = v.severity.value
+        violation_counts[key] = violation_counts.get(key, 0) + 1
+        if _is_blocking_violation(v):
+            blocking_count += 1
+
+    open_other_tasks = [
+        t
+        for t in tasks
+        if t.status == TaskStatus.OPEN and not t.type.startswith("POLICY_")
+    ]
+
     exports = list(
         session.scalars(
             select(ExportRun)
@@ -409,6 +500,8 @@ def claim_detail(
 
     submit_error = request.query_params.get("submit_error")
     submit_ok = request.query_params.get("submit_ok")
+    route_error = request.query_params.get("route_error")
+    route_ok = request.query_params.get("route_ok")
 
     return templates.TemplateResponse(
         "claim_detail.html",
@@ -418,13 +511,26 @@ def claim_detail(
             "claim": claim,
             "docs": docs,
             "items": items,
+            "items_by_id": items_by_id,
             "edit_item": edit_item,
             "tasks": tasks,
             "violations": violations,
+            "policy_tasks_by_key": policy_tasks_by_key,
+            "policy_summary": {
+                "open": open_violations,
+                "resolved": resolved_violations,
+                "counts": violation_counts,
+                "open_count": len(open_violations),
+                "blocking_count": blocking_count,
+            },
+            "open_other_tasks": open_other_tasks,
             "exports": exports,
             "fx_values": fx_values,
             "submit_error": submit_error,
             "submit_ok": submit_ok,
+            "route_error": route_error,
+            "route_ok": route_ok,
+            "route_targets": route_targets,
             "expense_categories": [
                 "transport",
                 "lodging",
@@ -587,6 +693,8 @@ def route_to_me(
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
+    if user.role != UserRole.ADMIN:
+        return RedirectResponse(url=f"/app/claims/{claim_id}", status_code=303)
 
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     try:
@@ -595,6 +703,37 @@ def route_to_me(
         pass
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
+
+@router.post("/app/claims/{claim_id}/route", response_class=RedirectResponse)
+def route_claim_ui(
+    claim_id: uuid.UUID,
+    request: Request,
+    approver_id: str = Form(...),
+    session: Session = Depends(db_session),
+) -> RedirectResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    if user.role != UserRole.ADMIN:
+        return RedirectResponse(url=f"/app/claims/{claim_id}", status_code=303)
+
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    try:
+        route_claim(session, claim=claim, approver_id=uuid.UUID(approver_id))
+        return RedirectResponse(url=f"/app/claims/{claim.id}?route_ok=1", status_code=303)
+    except HTTPException as e:
+        detail = e.detail
+        message = "Claim could not be routed."
+        if isinstance(detail, str):
+            message = detail
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?route_error={quote(message)}", status_code=303
+        )
+    except Exception:
+        return RedirectResponse(
+            url=f"/app/claims/{claim.id}?route_error={quote('Claim could not be routed.')}",
+            status_code=303,
+        )
 
 @router.post("/app/claims/{claim_id}/delete", response_class=RedirectResponse)
 def delete_claim_ui(
@@ -727,11 +866,15 @@ def resolve_task_ui(
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
+    redirect_claim_id = claim_id
     try:
-        resolve_task(session, task_id=task_id, user=user)
+        task = resolve_task(session, task_id=task_id, user=user)
+        redirect_claim_id = task.claim_id
+        if task.type.startswith("POLICY_"):
+            evaluate_claim(session, claim_id=task.claim_id)
     except Exception:
         pass
-    return RedirectResponse(url=f"/app/claims/{claim_id}", status_code=303)
+    return RedirectResponse(url=f"/app/claims/{redirect_claim_id}", status_code=303)
 
 
 @router.post("/app/claims/{claim_id}/fx", response_class=RedirectResponse)
