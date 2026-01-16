@@ -89,6 +89,19 @@ def route_claim(session: Session, *, claim: Claim, approver_id: uuid.UUID) -> Cl
     return claim
 
 
+def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
+    if user.role != UserRole.ADMIN and claim.employee_id != user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
+
+    if claim.status != ClaimStatus.DRAFT:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Only draft claims can be deleted"
+        )
+
+    session.delete(claim)
+    session.commit()
+
+
 def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
     if user.role != UserRole.ADMIN and claim.employee_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
