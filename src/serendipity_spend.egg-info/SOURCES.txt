@@ -44,6 +44,7 @@ src/serendipity_spend/modules/fx/models.py
 src/serendipity_spend/modules/fx/schemas.py
 src/serendipity_spend/modules/fx/service.py
 src/serendipity_spend/modules/identity/api.py
+src/serendipity_spend/modules/identity/google_oauth.py
 src/serendipity_spend/modules/identity/models.py
 src/serendipity_spend/modules/identity/schemas.py
 src/serendipity_spend/modules/identity/service.py
@@ -59,4 +60,8 @@ src/serendipity_spend/web/ui.py
 src/serendipity_spend/worker/celery_app.py
 src/serendipity_spend/worker/tasks.py
 tests/test_e2e_sample_pdf.py
+tests/test_exports_merged_pdf_and_xlsx_format.py
 tests/test_extraction_ocr_fallback.py
+tests/test_fx_auto_fetch.py
+tests/test_google_oauth_domain_restriction.py
+tests/test_policy_additional_rules.py

@@ -15,6 +15,7 @@ class ExportRunOut(BaseModel):
     status: ExportStatus
     error_message: str | None
     summary_xlsx_key: str | None
+    supporting_pdf_key: str | None
     supporting_zip_key: str | None
     completed_at: datetime | None
     created_at: datetime

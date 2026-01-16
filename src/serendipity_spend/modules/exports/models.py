@@ -30,6 +30,7 @@ class ExportRun(UUIDPrimaryKey, Timestamped, Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     summary_xlsx_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    supporting_pdf_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     supporting_zip_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
