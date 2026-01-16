@@ -10,7 +10,7 @@ from decimal import Decimal
 from io import BytesIO
 
 from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.currencies import normalize_currency
@@ -59,10 +59,13 @@ def extract_source_file(*, source_file_id: str) -> None:
         if not claim:
             return
 
-        source.status = SourceFileStatus.PROCESSING
-        source.error_message = None
-        session.add(source)
-        session.commit()
+        if source.status == SourceFileStatus.PROCESSED:
+            return
+
+        if not _try_start_source_processing(session=session, source=source):
+            return
+
+        _cleanup_source_file_evidence(session=session, source_id=source.id)
 
         try:
             body = get_storage().get(key=source.storage_key)
@@ -100,7 +103,25 @@ def extract_source_file(*, source_file_id: str) -> None:
             elif kind == "text":
                 _process_text(session=session, claim=claim, source=source, body=body)
             else:
-                raise ValueError("Unsupported file type (v1 supports PDF, images, and text)")
+                _sync_extraction_task(
+                    session=session,
+                    claim=claim,
+                    source=source,
+                    status=TaskStatus.OPEN,
+                    title=f"Unsupported upload: {source.filename}",
+                    description=(
+                        "This file type isn't supported yet. Upload PDF, images, or text files, "
+                        "or upload emails as .eml/.msg (or bundle multiple files in a .zip)."
+                    ),
+                )
+                source.status = SourceFileStatus.FAILED
+                source.error_message = "Unsupported file type"
+                session.add(source)
+                if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                    claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
+                    session.add(claim)
+                session.commit()
+                return
 
             from serendipity_spend.modules.policy.service import evaluate_claim
 
@@ -115,10 +136,60 @@ def extract_source_file(*, source_file_id: str) -> None:
 
             session.commit()
         except Exception as e:  # noqa: BLE001
+            _sync_extraction_task(
+                session=session,
+                claim=claim,
+                source=source,
+                status=TaskStatus.OPEN,
+                title=f"Extraction failed: {source.filename}",
+                description=(
+                    "We couldn't process this file. Try re-uploading it as a PDF/image/text file "
+                    "(or upload the original email as .eml/.msg). Error: " + str(e)
+                ),
+            )
             source.status = SourceFileStatus.FAILED
             source.error_message = str(e)
             session.add(source)
+            if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
+                session.add(claim)
             session.commit()
+
+
+def _try_start_source_processing(*, session, source: SourceFile) -> bool:
+    stale_before = datetime.now(UTC) - timedelta(minutes=30)
+    result = session.execute(
+        update(SourceFile)
+        .where(
+            SourceFile.id == source.id,
+            (
+                SourceFile.status.in_((SourceFileStatus.UPLOADED, SourceFileStatus.FAILED))
+                | (
+                    (SourceFile.status == SourceFileStatus.PROCESSING)
+                    & (SourceFile.updated_at < stale_before)
+                )
+            ),
+        )
+        .values(status=SourceFileStatus.PROCESSING, error_message=None)
+    )
+    if not result.rowcount:
+        return False
+    session.commit()
+    session.refresh(source)
+    return True
+
+
+def _cleanup_source_file_evidence(*, session, source_id: uuid.UUID) -> None:
+    evidence_ids = select(EvidenceDocument.id).where(EvidenceDocument.source_file_id == source_id)
+    session.execute(
+        ExpenseItemEvidence.__table__.delete().where(
+            ExpenseItemEvidence.evidence_document_id.in_(evidence_ids)
+        )
+    )
+    session.execute(
+        EvidenceDocument.__table__.delete().where(EvidenceDocument.source_file_id == source_id)
+    )
+    session.commit()
 
 
 def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: bytes) -> None:
@@ -445,6 +516,8 @@ def _looks_like_image_bytes(body: bytes) -> bool:
         or b.startswith(b"II*\x00")
         or b.startswith(b"MM\x00*")
         or b.startswith(b"BM")
+        or b.startswith((b"GIF87a", b"GIF89a"))
+        or (len(b) >= 12 and b.startswith(b"RIFF") and b[8:12] == b"WEBP")
     )
 
 
@@ -1891,11 +1964,13 @@ def _sync_extraction_task(
 def _is_supported_image(filename: str, content_type: str | None) -> bool:
     if (content_type or "").lower().startswith("image/"):
         return True
-    return filename.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"))
+    return filename.lower().endswith(
+        (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp")
+    )
 
 
 def _is_supported_text(filename: str, content_type: str | None) -> bool:
     ctype = (content_type or "").lower()
     if ctype.startswith("text/plain") or ctype.startswith("text/html"):
         return True
-    return filename.lower().endswith((".txt", ".md", ".html", ".htm"))
+    return filename.lower().endswith((".txt", ".md", ".html", ".htm", ".csv"))

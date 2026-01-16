@@ -72,7 +72,11 @@ tests/test_extraction_ocr_fallback.py
 tests/test_file_type_detection.py
 tests/test_fx_auto_fetch.py
 tests/test_google_oauth_domain_restriction.py
+tests/test_msg_body_ingestion.py
 tests/test_policy_additional_rules.py
 tests/test_policy_exception_workflow.py
 tests/test_receipt_ai_cache.py
+tests/test_sourcefile_idempotency.py
+tests/test_storage_gc_on_claim_delete.py
 tests/test_ui_policy_summary.py
+tests/test_unsupported_upload_soft_fail.py

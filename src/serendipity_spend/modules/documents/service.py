@@ -124,6 +124,27 @@ def create_source_files_from_upload(
             )
         return sources
 
+    if _is_msg_upload(filename=filename, content_type=content_type):
+        children = _unpack_msg_upload(body)
+        if not children:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Outlook message has no body or attachments to ingest.",
+            )
+        sources: list[SourceFile] = []
+        for child in children:
+            sources.extend(
+                create_source_files_from_upload(
+                    session,
+                    claim=claim,
+                    user=user,
+                    filename=child["filename"],
+                    content_type=child.get("content_type"),
+                    body=child["body"],
+                )
+            )
+        return sources
+
     return [
         create_source_file(
             session,
@@ -149,6 +170,15 @@ def _is_eml_upload(*, filename: str, content_type: str | None) -> bool:
     if filename.lower().endswith(".eml"):
         return True
     return (content_type or "").lower() in {"message/rfc822"}
+
+
+def _is_msg_upload(*, filename: str, content_type: str | None) -> bool:
+    if filename.lower().endswith(".msg"):
+        return True
+    return (content_type or "").lower() in {
+        "application/vnd.ms-outlook",
+        "application/x-msg",
+    }
 
 
 def _sanitize_filename(name: str) -> str:
@@ -256,6 +286,120 @@ def _unpack_eml_upload(body: bytes) -> list[dict]:
             }
         )
     return out
+
+
+def _unpack_msg_upload(body: bytes) -> list[dict]:
+    from datetime import datetime
+    from email.utils import parseaddr
+    from tempfile import TemporaryDirectory
+
+    try:
+        import extract_msg
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Outlook .msg ingestion is not available. Upload as .eml instead.",
+        ) from e
+
+    with TemporaryDirectory() as tmpdir:
+        from pathlib import Path
+
+        msg_path = Path(tmpdir) / "upload.msg"
+        msg_path.write_bytes(body)
+        try:
+            msg = extract_msg.Message(str(msg_path))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not read Outlook .msg file.",
+            ) from e
+
+        out: list[dict] = []
+        try:
+            subject = str(getattr(msg, "subject", "") or "").strip()
+            from_header = str(getattr(msg, "sender", "") or "").strip()
+            to_header = str(getattr(msg, "to", "") or "").strip()
+
+            sender_hint = ""
+            from_name, from_addr = parseaddr(from_header)
+            from_name = str(from_name or "").strip()
+            sender_hint = from_name
+            if not sender_hint and "@" in from_addr:
+                sender_hint = from_addr.split("@", 1)[-1].strip()
+
+            email_date_iso = None
+            parsed = getattr(msg, "parsedDate", None)
+            if parsed:
+                try:
+                    email_date_iso = parsed.date().isoformat()
+                except Exception:
+                    email_date_iso = None
+            elif getattr(msg, "date", None):
+                raw_date = str(getattr(msg, "date", "") or "").strip()
+                if raw_date:
+                    try:
+                        email_date_iso = datetime.fromisoformat(raw_date).date().isoformat()
+                    except Exception:
+                        email_date_iso = None
+
+            body_text = str(getattr(msg, "body", "") or "").strip()
+            html_body = str(getattr(msg, "htmlBody", "") or "").strip()
+            if (not body_text) and html_body:
+                body_text = _html_to_text(html_body)
+
+            if body_text and body_text.strip():
+                header_lines: list[str] = []
+                if sender_hint:
+                    header_lines.append(sender_hint)
+                if subject:
+                    header_lines.append(f"Subject: {subject}")
+                if from_header:
+                    header_lines.append(f"From: {from_header}")
+                if to_header:
+                    header_lines.append(f"To: {to_header}")
+
+                combined_text = "\n".join(header_lines) + "\n\n" + body_text.strip()
+                if email_date_iso:
+                    combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
+                combined = (combined_text + "\n").encode("utf-8", errors="replace")
+                out.append(
+                    {
+                        "filename": _sanitize_filename(_email_body_filename(subject))
+                        or "email-body.txt",
+                        "content_type": "text/plain",
+                        "body": combined,
+                    }
+                )
+
+            idx = 0
+            for att in getattr(msg, "attachments", []) or []:
+                payload = getattr(att, "data", None)
+                if callable(payload):
+                    payload = payload()
+                if not payload:
+                    continue
+
+                filename = (
+                    str(getattr(att, "longFilename", "") or "").strip()
+                    or str(getattr(att, "shortFilename", "") or "").strip()
+                    or str(getattr(att, "name", "") or "").strip()
+                    or f"attachment-{idx}"
+                )
+                idx += 1
+                out.append(
+                    {
+                        "filename": _sanitize_filename(filename) or f"attachment-{idx}",
+                        "content_type": getattr(att, "mimetype", None),
+                        "body": payload,
+                    }
+                )
+        finally:
+            try:
+                msg.close()
+            except Exception:
+                pass
+
+        return out
 
 
 def _email_body_filename(subject: str) -> str:

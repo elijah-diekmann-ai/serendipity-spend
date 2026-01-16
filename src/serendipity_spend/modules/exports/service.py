@@ -81,8 +81,17 @@ def generate_export(*, export_run_id: str) -> None:
             summary_key = f"claims/{claim.id}/exports/{run.id}/summary.xlsx"
             supporting_key = f"claims/{claim.id}/exports/{run.id}/supporting.pdf"
 
-            get_storage().put(key=summary_key, body=xlsx_bytes)
-            get_storage().put(key=supporting_key, body=pdf_bytes)
+            storage = get_storage()
+            for key in (run.summary_xlsx_key, run.supporting_pdf_key):
+                if not key:
+                    continue
+                try:
+                    storage.delete(key=key)
+                except Exception:
+                    pass
+
+            storage.put(key=summary_key, body=xlsx_bytes)
+            storage.put(key=supporting_key, body=pdf_bytes)
 
             run.status = ExportStatus.COMPLETED
             run.summary_xlsx_key = summary_key
@@ -313,12 +322,24 @@ def _sort_sources_for_supporting_pdf(
 
 
 def _source_file_to_pdf_reader(*, source: SourceFile, body: bytes) -> PdfReader:
-    if _is_pdf_source(source.filename, source.content_type):
+    from serendipity_spend.modules.extraction.service import _detect_file_kind
+
+    kind = _detect_file_kind(
+        filename=source.filename,
+        content_type=source.content_type,
+        body=body,
+    )
+    if kind == "bad_pdf_upload":
+        raise ValueError(
+            "Bad upload: file looks like a PDF but does not start with the %PDF header "
+            f"({source.filename})"
+        )
+    if kind == "pdf":
         return PdfReader(io.BytesIO(body))
-    if _is_image_source(source.filename, source.content_type):
+    if kind == "image":
         pdf_bytes = _image_bytes_to_pdf(body)
         return PdfReader(io.BytesIO(pdf_bytes))
-    if _is_text_source(source.filename, source.content_type):
+    if kind == "text":
         pdf_bytes = _text_bytes_to_pdf(
             body,
             filename=source.filename,
@@ -326,27 +347,6 @@ def _source_file_to_pdf_reader(*, source: SourceFile, body: bytes) -> PdfReader:
         )
         return PdfReader(io.BytesIO(pdf_bytes))
     raise ValueError(f"Unsupported supporting document type: {source.filename}")
-
-
-def _is_pdf_source(filename: str, content_type: str | None) -> bool:
-    if filename.lower().endswith(".pdf"):
-        return True
-    return (content_type or "").lower().endswith("/pdf")
-
-
-def _is_image_source(filename: str, content_type: str | None) -> bool:
-    if (content_type or "").lower().startswith("image/"):
-        return True
-    lower = filename.lower()
-    return lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"))
-
-
-def _is_text_source(filename: str, content_type: str | None) -> bool:
-    ctype = (content_type or "").lower()
-    if ctype.startswith("text/plain") or ctype.startswith("text/html"):
-        return True
-    lower = filename.lower()
-    return lower.endswith((".txt", ".md", ".html", ".htm", ".csv"))
 
 
 def _text_bytes_to_pdf(body: bytes, *, filename: str, content_type: str | None) -> bytes:

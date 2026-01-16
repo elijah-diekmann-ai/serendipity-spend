@@ -7,6 +7,7 @@ Description-Content-Type: text/markdown
 Requires-Dist: alembic>=1.13.2
 Requires-Dist: boto3>=1.34.160
 Requires-Dist: celery>=5.4.0
+Requires-Dist: extract-msg>=0.55.0
 Requires-Dist: email-validator>=2.2.0
 Requires-Dist: fastapi>=0.115.0
 Requires-Dist: httpx>=0.27.0
