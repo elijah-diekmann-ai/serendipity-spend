@@ -108,27 +108,64 @@
             </div>
             <input id="file-input" type="file" name="uploads" multiple accept=".pdf,.zip,.eml,.msg,image/*,message/rfc822" style="display:none;" />
             <div id="selected-files" class="selected-files"></div>
-            <button class="btn btn-sm mt-1" type="submit">Upload</button>
+            <div class="btn-row mt-1">
+              <button class="btn btn-sm" type="submit">Upload</button>
+              <button type="button" class="btn btn-sm" id="clear-files" style="display:none;">Clear</button>
+            </div>
           </form>
           <script>
             (function() {
               const dz = document.getElementById('dropzone');
               const input = document.getElementById('file-input');
               const selected = document.getElementById('selected-files');
+              const clearBtn = document.getElementById('clear-files');
               if (!dz || !input) return;
+              
+              let allFiles = [];
+              
               dz.addEventListener('click', () => input.click());
               dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dropzone--active'); });
               dz.addEventListener('dragleave', () => dz.classList.remove('dropzone--active'));
-              dz.addEventListener('drop', (e) => { e.preventDefault(); dz.classList.remove('dropzone--active'); if (e.dataTransfer?.files) input.files = e.dataTransfer.files; updateFileList(); });
-              input.addEventListener('change', updateFileList);
-              function updateFileList() {
+              dz.addEventListener('drop', (e) => { 
+                e.preventDefault(); 
+                dz.classList.remove('dropzone--active'); 
+                if (e.dataTransfer?.files) addFiles(e.dataTransfer.files);
+              });
+              input.addEventListener('change', () => addFiles(input.files));
+              if (clearBtn) clearBtn.addEventListener('click', clearFiles);
+              
+              function addFiles(fileList) {
+                for (const f of fileList) {
+                  if (!allFiles.some(x => x.name === f.name && x.size === f.size)) {
+                    allFiles.push(f);
+                  }
+                }
+                syncInput();
+                updateDisplay();
+              }
+              
+              function clearFiles() {
+                allFiles = [];
+                syncInput();
+                updateDisplay();
+              }
+              
+              function syncInput() {
+                const dt = new DataTransfer();
+                allFiles.forEach(f => dt.items.add(f));
+                input.files = dt.files;
+              }
+              
+              function updateDisplay() {
                 if (!selected) return;
-                const files = Array.from(input.files || []);
-                if (files.length === 0) {
+                if (clearBtn) clearBtn.style.display = allFiles.length ? 'inline-flex' : 'none';
+                if (allFiles.length === 0) {
                   selected.innerHTML = '';
                   return;
                 }
-                selected.innerHTML = files.map(f => `<div class="selected-file">${f.name} <span class="muted">(${(f.size/1024).toFixed(1)} KB)</span></div>`).join('');
+                selected.innerHTML = allFiles.map(f => 
+                  `<div class="selected-file">${f.name} <span class="muted">(${(f.size/1024).toFixed(1)} KB)</span></div>`
+                ).join('');
               }
             })();
           </script>
