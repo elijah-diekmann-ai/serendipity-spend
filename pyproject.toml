@@ -12,6 +12,7 @@ dependencies = [
   "alembic>=1.13.2",
   "boto3>=1.34.160",
   "celery>=5.4.0",
+  "extract-msg>=0.55.0",
   "email-validator>=2.2.0",
   "fastapi>=0.115.0",
   "httpx>=0.27.0",

@@ -136,6 +136,7 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
         )
 
     # Delete related records first (foreign key constraints)
+    from serendipity_spend.core.storage import get_storage
     from serendipity_spend.modules.audit.models import AuditEvent
     from serendipity_spend.modules.documents.models import EvidenceDocument, SourceFile
     from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
@@ -143,6 +144,19 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
     from serendipity_spend.modules.fx.models import FxRate
     from serendipity_spend.modules.policy.models import PolicyException
     from serendipity_spend.modules.workflow.models import Approval, Task
+
+    storage_keys = list(
+        session.scalars(select(SourceFile.storage_key).where(SourceFile.claim_id == claim.id))
+    )
+    export_runs = list(session.scalars(select(ExportRun).where(ExportRun.claim_id == claim.id)))
+    export_keys: list[str] = []
+    for run in export_runs:
+        if run.summary_xlsx_key:
+            export_keys.append(run.summary_xlsx_key)
+        if run.supporting_pdf_key:
+            export_keys.append(run.supporting_pdf_key)
+
+    keys_to_delete = sorted(set(storage_keys + export_keys))
 
     # Get expense item IDs for evidence cleanup
     item_ids = [
@@ -175,6 +189,13 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
 
     session.delete(claim)
     session.commit()
+
+    storage = get_storage()
+    for key in keys_to_delete:
+        try:
+            storage.delete(key=key)
+        except Exception:
+            continue
 
 
 def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
