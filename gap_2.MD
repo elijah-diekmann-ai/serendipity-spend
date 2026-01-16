@@ -2,13 +2,13 @@
 
 ## Problem
 
-Export produces `supporting.zip` (archive of files) instead of a single merged PDF.
+Export previously produced `supporting.zip` (archive of files) instead of a single merged PDF.
 Finance workflow requires one combined PDF like `DC_OOP_05 Sep 2025.pdf`.
 
 ## Current behavior
 
 - `Summary.xlsx` — generated
-- `supporting.zip` — all receipts as separate files in archive
+- `Supporting_Documents.pdf` — all receipts merged into one PDF
 
 The system is functional but two gaps remain:
 1. **Merged PDF export** — implement single PDF instead of ZIP

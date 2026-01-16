@@ -100,6 +100,34 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
             status_code=status.HTTP_409_CONFLICT, detail="Only draft claims can be deleted"
         )
 
+    # Delete related records first (foreign key constraints)
+    from serendipity_spend.modules.audit.models import AuditEvent
+    from serendipity_spend.modules.documents.models import EvidenceDocument, SourceFile
+    from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
+    from serendipity_spend.modules.exports.models import ExportRun
+    from serendipity_spend.modules.fx.models import FxRate
+    from serendipity_spend.modules.workflow.models import Approval, Task
+
+    # Get expense item IDs for evidence cleanup
+    item_ids = [i.id for i in session.scalars(select(ExpenseItem).where(ExpenseItem.claim_id == claim.id))]
+    if item_ids:
+        session.execute(ExpenseItemEvidence.__table__.delete().where(ExpenseItemEvidence.expense_item_id.in_(item_ids)))
+
+    # Get source file IDs for evidence cleanup
+    source_ids = [s.id for s in session.scalars(select(SourceFile).where(SourceFile.claim_id == claim.id))]
+    if source_ids:
+        session.execute(EvidenceDocument.__table__.delete().where(EvidenceDocument.source_file_id.in_(source_ids)))
+
+    # Delete related records
+    session.execute(ExpenseItem.__table__.delete().where(ExpenseItem.claim_id == claim.id))
+    session.execute(SourceFile.__table__.delete().where(SourceFile.claim_id == claim.id))
+    session.execute(FxRate.__table__.delete().where(FxRate.claim_id == claim.id))
+    session.execute(PolicyViolation.__table__.delete().where(PolicyViolation.claim_id == claim.id))
+    session.execute(Task.__table__.delete().where(Task.claim_id == claim.id))
+    session.execute(Approval.__table__.delete().where(Approval.claim_id == claim.id))
+    session.execute(ExportRun.__table__.delete().where(ExportRun.claim_id == claim.id))
+    session.execute(AuditEvent.__table__.delete().where(AuditEvent.claim_id == claim.id))
+
     session.delete(claim)
     session.commit()
 

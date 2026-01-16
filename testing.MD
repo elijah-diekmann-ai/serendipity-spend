@@ -116,7 +116,7 @@ As an admin, you can approve your own claims:
 2. Wait a moment for generation
 3. Download:
    - **Summary.xlsx** - The reimbursement spreadsheet
-   - **Documents.zip** - All uploaded receipts
+   - **Supporting_Documents.pdf** - All receipts merged into one PDF
 
 ✅ Open the Excel file to see the itemized summary with totals.
 
@@ -142,6 +142,6 @@ You've tested the full flow if you can:
 - [x] Upload receipts and see extracted expenses
 - [x] Fix policy issues (FX rates, missing info)
 - [x] Submit and approve the claim
-- [x] Download the Excel summary + documents ZIP
+- [x] Download the Excel summary + supporting PDF
 
 🎉 That's the complete expense reimbursement workflow!
