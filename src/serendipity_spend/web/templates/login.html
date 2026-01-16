@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel" style="max-width: 520px; margin: 40px auto;">
+    <div class="panel-header">
+      <div>
+        <h1 class="title">Sign in</h1>
+        <p class="subtitle">Use the same credentials as the API (JWT).</p>
+      </div>
+    </div>
+    <div class="panel-body">
+      {% if error %}
+        <div class="callout error" style="margin-bottom: 12px;">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="/login">
+        <div style="margin-bottom: 10px;">
+          <label>Email</label>
+          <input type="email" name="email" autocomplete="username" required />
+        </div>
+        <div style="margin-bottom: 14px;">
+          <label>Password</label>
+          <input type="password" name="password" autocomplete="current-password" required />
+        </div>
+        <button class="btn" type="submit" style="width: 100%;">Continue</button>
+      </form>
+      <div class="callout" style="margin-top: 12px;">
+        Tip: set <code>INIT_ADMIN_EMAIL</code> and <code>INIT_ADMIN_PASSWORD</code> in <code>.env</code> to bootstrap an admin user on startup.
+      </div>
+    </div>
+  </div>
+{% endblock %}
+

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Serendipity Spend</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a class="brand" href="/app">
+          <span class="brand-badge"></span>
+          <span>Serendipity Spend</span>
+        </a>
+        {% if user %}
+        <div class="nav">
+          <span class="muted">{{ user.email }} · {{ user.role.value }}</span>
+          <form method="post" action="/logout">
+            <button class="btn btn-ghost" type="submit">Logout</button>
+          </form>
+        </div>
+        {% endif %}
+      </div>
+    </header>
+    <main class="container">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>
