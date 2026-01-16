@@ -1,6 +1,4 @@
-# Serendipity Spend
-
-**TL;DR — Serendipity Spend is an expense reimbursement portal.**
+# Serendipity Reimbursement Portal
 
 ## What it does
 
