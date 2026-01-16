@@ -15,5 +15,5 @@ from serendipity_spend.modules.documents.models import EvidenceDocument, SourceF
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence  # noqa: F401
 from serendipity_spend.modules.exports.models import ExportRun  # noqa: F401
 from serendipity_spend.modules.fx.models import FxRate  # noqa: F401
-from serendipity_spend.modules.policy.models import PolicyViolation  # noqa: F401
+from serendipity_spend.modules.policy.models import PolicyException, PolicyViolation  # noqa: F401
 from serendipity_spend.modules.workflow.models import Approval, Task  # noqa: F401

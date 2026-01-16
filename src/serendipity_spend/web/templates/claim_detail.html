@@ -526,7 +526,7 @@
             <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Reject</button>
           </form>
         {% endif %}
-        {% if claim.status.value == 'DRAFT' %}
+        {% if claim.status.value in ['DRAFT', 'PROCESSING'] %}
           <form method="post" action="/app/claims/{{ claim.id }}/delete" onsubmit="return confirm('Delete this claim?');">
             <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Delete claim</button>
           </form>

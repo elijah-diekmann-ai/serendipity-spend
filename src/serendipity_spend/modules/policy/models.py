@@ -22,6 +22,12 @@ class ViolationStatus(str, enum.Enum):
     RESOLVED = "RESOLVED"
 
 
+class PolicyExceptionStatus(str, enum.Enum):
+    REQUESTED = "REQUESTED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class PolicyViolation(UUIDPrimaryKey, Timestamped, Base):
     __tablename__ = "policy_violation"
     __table_args__ = (UniqueConstraint("dedupe_key", name="uq_policy_violation_dedupe"),)
@@ -51,3 +57,38 @@ class PolicyViolation(UUIDPrimaryKey, Timestamped, Base):
 
     claim = relationship("Claim")
     expense_item = relationship("ExpenseItem")
+
+
+class PolicyException(UUIDPrimaryKey, Timestamped, Base):
+    __tablename__ = "policy_exception"
+    __table_args__ = (UniqueConstraint("dedupe_key", name="uq_policy_exception_dedupe"),)
+
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("claims_claim.id"), index=True
+    )
+    expense_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("expenses_expense_item.id"), nullable=True
+    )
+
+    rule_id: Mapped[str] = mapped_column(String(20), index=True)
+    rule_version: Mapped[str] = mapped_column(String(20), default="1")
+    status: Mapped[PolicyExceptionStatus] = mapped_column(
+        Enum(PolicyExceptionStatus, native_enum=False), index=True
+    )
+
+    justification: Mapped[str] = mapped_column(Text)
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("identity_user.id"), index=True
+    )
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("identity_user.id"), nullable=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    dedupe_key: Mapped[str] = mapped_column(String(120))
+
+    claim = relationship("Claim")
+    expense_item = relationship("ExpenseItem")
+    requested_by = relationship("User", foreign_keys=[requested_by_user_id])
+    decided_by = relationship("User", foreign_keys=[decided_by_user_id])
