@@ -42,7 +42,7 @@
             {% for c in claims %}
               <tr>
                 <td>
-                  <a href="/app/claims/{{ c.id }}">#{{ c.id }}</a>
+                  <a href="/app/claims/{{ c.id }}">#{{ c.id|string|truncate(8, True, '') }}</a>
                 </td>
                 <td>
                   {% if c.status.value == 'DRAFT' %}

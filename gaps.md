@@ -1,59 +1,59 @@
-# Serendipity Spend — Known Gaps
+# Serendipity Spend — Gaps
 
-This document outlines areas where the current implementation does not fully address the stated requirements. Each gap requires investigation to determine the appropriate solution.
+## Problem Statement
 
----
+Currently, employees who wish to claim travel expenses send invoices and receipts directly to me (for example, hotel confirmation emails, Uber receipts, etc.). I then manually review these items and prepare a summary table in Excel. As part of this process, I check each item for compliance with the Travel Policy, such as ensuring hotel rates do not exceed USD 300 per night and that flights under six hours are booked in economy class.
 
-## 1. Receipt Coverage
+This process is entirely manual, time-consuming, and prone to errors, including incorrect amounts and potential duplication.
 
-The extraction layer only handles four receipt types: Grab, Uber, United Wi-Fi, and airline baggage fees.
+Ideally, the process would be streamlined as follows:
 
-Common expense categories remain unhandled:
-- Hotel invoices and confirmation emails
-- Flight itineraries and boarding passes
-- Restaurant and food/beverage receipts
-- Generic expense receipts (taxis, office supplies, etc.)
-
-Unknown receipt formats are currently skipped without extraction.
+1. Employees upload all relevant supporting documents to a portal, which automatically generates a claim summary.
+2. Automated checks are performed against the Travel Policy, with any inconsistencies clearly flagged at the summary level.
+3. Employees review the generated summary to confirm accuracy and completeness, fill in any missing information (for example, trip purpose, or names of attendees for food and beverage expenses over USD 100), and address any flagged items.
+4. The summary and supporting documents are then routed to me for review and approval prior to payment.
 
 ---
 
-## 2. Policy Rule Coverage
+## Areas to Investigate
 
-The policy engine checks for missing claim metadata (purpose, travel dates, FX rates) and flags specific vendor issues (Uber trip summaries, Grab personal profiles).
+### Receipt Extraction
 
-The following rules from the Travel Policy are not implemented:
-- Hotel nightly rate limits
-- Flight class restrictions based on duration
-- Attendee documentation requirements for meal expenses above thresholds
+Current parsers handle Grab, Uber, United Wi-Fi, and baggage fees only.
 
-The policy rule set should be reviewed against the full Travel Policy document.
+Evaluate coverage for: hotels, flights, restaurants, and general receipts. Determine how unrecognized formats should be handled.
 
----
+### Policy Rules
 
-## 3. OCR Accuracy
+Current checks: missing purpose, travel dates, FX rates, and vendor-specific warnings.
 
-Text extraction relies on pypdf with Tesseract OCR as a fallback for image-based pages.
+Review the full Travel Policy and identify which rules are not enforced.
 
-This approach may produce unreliable results for:
-- Scanned paper receipts
-- Photographed documents
-- Receipts with non-Latin scripts
-- Low-resolution images
+### OCR Pipeline
 
-The OCR pipeline should be evaluated against representative sample documents.
+Text extraction uses pypdf with Tesseract fallback.
 
----
+Test against representative documents including scanned receipts and photos. Assess whether accuracy meets requirements.
 
-## 4. Input Channels
+### Input Channels
 
-The system accepts documents via manual file upload only.
+Documents are uploaded manually via the web portal.
 
-The original workflow describes employees forwarding receipts via email. There is no mechanism to ingest emailed documents or attachments.
+The original workflow involves emailed receipts. Determine if email ingestion is needed.
+
+### Batch Uploads
+
+The current upload flow accepts one file at a time I believe.
+
+Employees often have many receipts per trip (10-20+ images or PDFs). Uploading individually would be tedious. Investigate support for:
+
+- Multi-file selection in a single upload
+- Drag-and-drop of multiple files
+- ZIP file upload containing multiple receipts
+- Processing multiple images/PDFs as separate line items from one upload
 
 ---
 
 ## Next Steps
 
-Review each gap area, identify specific deficiencies in the codebase, and implement solutions that handle real-world document variability.
-
+Identify specific deficiencies in each area and implement solutions. Keep the solutions minimal and simple but ensure the system fully solves the core problem statement above and addresses remaining gaps.

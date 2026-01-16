@@ -59,8 +59,10 @@ def extract_source_file(*, source_file_id: str) -> None:
                 "/pdf"
             ):
                 _process_pdf_bundle(session=session, claim=claim, source=source, body=body)
+            elif _is_supported_image(source.filename, source.content_type):
+                _process_image(session=session, claim=claim, source=source, body=body)
             else:
-                raise ValueError("Unsupported file type (v1 supports PDF receipts only)")
+                raise ValueError("Unsupported file type (v1 supports PDF and image receipts)")
 
             from serendipity_spend.modules.policy.service import evaluate_claim
 
@@ -156,6 +158,75 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
     session.commit()
 
 
+def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) -> None:
+    text = _ocr_image_bytes(body)
+    vendor, receipt_type, confidence = _classify_text(text)
+    text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    evidence = EvidenceDocument(
+        source_file_id=source.id,
+        page_start=None,
+        page_end=None,
+        vendor=vendor,
+        receipt_type=receipt_type,
+        extracted_text=text,
+        text_hash=text_hash,
+        classification_confidence=confidence,
+    )
+    session.add(evidence)
+    session.flush()
+
+    parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    if not parsed:
+        session.commit()
+        return
+
+    amount_home, fx_rate_to_home = _convert_to_home(
+        session=session,
+        claim_id=claim.id,
+        from_currency=parsed.currency,
+        to_currency=claim.home_currency,
+        amount=parsed.amount,
+    )
+
+    dedupe_key = _dedupe_key(parsed.vendor, parsed.vendor_reference, text_hash)
+
+    item = session.scalar(
+        select(ExpenseItem).where(ExpenseItem.claim_id == claim.id, ExpenseItem.dedupe_key == dedupe_key)
+    )
+    if not item:
+        item = ExpenseItem(
+            claim_id=claim.id,
+            vendor=parsed.vendor,
+            vendor_reference=parsed.vendor_reference,
+            receipt_type=parsed.receipt_type,
+            category=parsed.category,
+            description=parsed.description,
+            transaction_date=parsed.transaction_date,
+            transaction_at=None,
+            amount_original_amount=parsed.amount,
+            amount_original_currency=parsed.currency,
+            amount_home_amount=amount_home,
+            amount_home_currency=claim.home_currency,
+            fx_rate_to_home=fx_rate_to_home,
+            metadata_json=parsed.metadata,
+            dedupe_key=dedupe_key,
+        )
+        session.add(item)
+        session.flush()
+
+    existing_link = session.scalar(
+        select(ExpenseItemEvidence).where(
+            ExpenseItemEvidence.expense_item_id == item.id,
+            ExpenseItemEvidence.evidence_document_id == evidence.id,
+        )
+    )
+    if not existing_link:
+        session.add(ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id))
+
+    session.commit()
+
+
 def _extract_pdf_pages(body: bytes) -> list[str]:
     reader = PdfReader(BytesIO(body))
     pages: list[str] = []
@@ -204,6 +275,31 @@ def _ocr_pdf_page(page) -> str:
         return ""
 
 
+def _ocr_image_bytes(body: bytes) -> str:
+    try:
+        import pytesseract
+    except Exception:
+        return ""
+
+    try:
+        from PIL import Image
+    except Exception:
+        return ""
+
+    try:
+        image = Image.open(BytesIO(body))
+    except Exception:
+        return ""
+
+    tesseract_lang = os.getenv("TESSERACT_LANG", "eng")
+    try:
+        if image.mode not in {"RGB", "L"}:
+            image = image.convert("RGB")
+        return pytesseract.image_to_string(image, lang=tesseract_lang) or ""
+    except Exception:
+        return ""
+
+
 def _segment_pdf_pages(pages: list[str]) -> list[Segment]:
     segments: list[Segment] = []
     i = 0
@@ -245,6 +341,18 @@ def _is_baggage_fee(text: str) -> bool:
     return "PAYMENT RECEIPT" in text and "BAG FEE" in text
 
 
+def _classify_text(text: str) -> tuple[str, str, float]:
+    if _is_baggage_fee(text):
+        return "Airline", "payment_receipt", 0.9
+    if _is_united_start(text):
+        return "United Airlines", "email_receipt", 0.9
+    if _is_grab_start(text):
+        return "Grab", "ride_receipt", 0.6
+    if _is_uber_start(text):
+        return "Uber", "trip_summary", 0.6
+    return "Unknown", "unknown", 0.1
+
+
 def _parse_segment(*, seg: Segment, pages: list[str]):
     if seg.vendor == "Grab":
         return parse_grab_ride_receipt(pages[seg.start_page_idx], pages[seg.start_page_idx + 1])
@@ -258,6 +366,13 @@ def _parse_segment(*, seg: Segment, pages: list[str]):
         return parse_baggage_fee_payment_receipt(pages[seg.start_page_idx])
     return None
 
+
+def _parse_single_text(*, vendor: str, receipt_type: str, text: str):
+    if vendor == "United Airlines":
+        return parse_united_wifi_receipt(text)
+    if vendor == "Airline" and receipt_type == "payment_receipt":
+        return parse_baggage_fee_payment_receipt(text)
+    return None
 
 def _dedupe_key(vendor: str, vendor_reference: str | None, text_hash: str) -> str:
     if vendor_reference:
@@ -288,3 +403,9 @@ def _convert_to_home(
     if not fx:
         return None, None
     return (amount * fx.rate).quantize(Decimal("0.01")), fx.rate
+
+
+def _is_supported_image(filename: str, content_type: str | None) -> bool:
+    if (content_type or "").lower().startswith("image/"):
+        return True
+    return filename.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"))

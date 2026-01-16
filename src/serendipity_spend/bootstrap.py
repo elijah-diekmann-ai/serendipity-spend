@@ -18,21 +18,32 @@ def bootstrap() -> None:
 
     if not settings.init_admin_email:
         return
+
+    # Support comma-separated list of admin emails
+    admin_emails = [e.strip() for e in settings.init_admin_email.split(",") if e.strip()]
+    
+    if not admin_emails:
+        return
     if not settings.init_admin_password and not google_oauth_enabled():
         return
 
     password = settings.init_admin_password or secrets.token_urlsafe(32)
 
     with SessionLocal() as session:
-        existing = session.scalar(select(User).where(User.email == settings.init_admin_email))
-        if existing:
-            return
-        admin = User(
-            email=settings.init_admin_email,
-            full_name="Admin",
-            password_hash=hash_password(password),
-            role=UserRole.ADMIN,
-            is_active=True,
-        )
-        session.add(admin)
+        for email in admin_emails:
+            existing = session.scalar(select(User).where(User.email == email))
+            if existing:
+                # Ensure existing user is admin
+                if existing.role != UserRole.ADMIN:
+                    existing.role = UserRole.ADMIN
+                    session.add(existing)
+                continue
+            admin = User(
+                email=email,
+                full_name="Admin",
+                password_hash=hash_password(password),
+                role=UserRole.ADMIN,
+                is_active=True,
+            )
+            session.add(admin)
         session.commit()

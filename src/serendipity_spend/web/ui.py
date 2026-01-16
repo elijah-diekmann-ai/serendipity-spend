@@ -26,7 +26,11 @@ from serendipity_spend.modules.claims.service import (
     update_claim,
 )
 from serendipity_spend.modules.documents.models import SourceFile
-from serendipity_spend.modules.documents.service import create_source_file, list_source_files
+from serendipity_spend.modules.documents.service import (
+    create_source_file,
+    create_source_files_from_upload,
+    list_source_files,
+)
 from serendipity_spend.modules.expenses.service import list_items
 from serendipity_spend.modules.exports.models import ExportRun
 from serendipity_spend.modules.exports.service import create_export_run
@@ -366,7 +370,8 @@ def claim_update(
 async def upload_document_ui(
     claim_id: uuid.UUID,
     request: Request,
-    upload: UploadFile = File(...),
+    upload: UploadFile | None = File(None),
+    uploads: list[UploadFile] | None = File(None),
     session: Session = Depends(db_session),
 ) -> RedirectResponse:
     user = _get_optional_user(request, session)
@@ -374,16 +379,19 @@ async def upload_document_ui(
         return RedirectResponse(url="/login", status_code=303)
 
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
-    body = await upload.read()
-    source = create_source_file(
-        session,
-        claim=claim,
-        user=user,
-        filename=upload.filename or "upload.bin",
-        content_type=upload.content_type,
-        body=body,
-    )
-    extract_source_file_task.delay(str(source.id))
+    batch = uploads or ([upload] if upload is not None else [])
+    for f in batch:
+        body = await f.read()
+        sources = create_source_files_from_upload(
+            session,
+            claim=claim,
+            user=user,
+            filename=f.filename or "upload.bin",
+            content_type=f.content_type,
+            body=body,
+        )
+        for source in sources:
+            extract_source_file_task.delay(str(source.id))
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 

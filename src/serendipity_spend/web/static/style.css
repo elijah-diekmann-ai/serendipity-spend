@@ -493,6 +493,21 @@ input[type="file"] {
   background: var(--bg-elevated);
 }
 
+.dropzone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  padding: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dropzone--active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
 .form-group {
   margin-bottom: 16px;
 }
