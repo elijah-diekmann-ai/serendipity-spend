@@ -94,7 +94,7 @@ def verify_google_id_token(id_token: str) -> dict[str, Any]:
         key.to_pem().decode("utf-8"),
         algorithms=[alg],
         audience=settings.google_oauth_client_id,
-        options={"verify_iss": False},
+        options={"verify_iss": False, "verify_at_hash": False},
     )
 
     issuer = claims.get("iss")
