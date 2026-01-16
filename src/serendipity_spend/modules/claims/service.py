@@ -109,12 +109,18 @@ def delete_claim(session: Session, *, claim: Claim, user: User) -> None:
     from serendipity_spend.modules.workflow.models import Approval, Task
 
     # Get expense item IDs for evidence cleanup
-    item_ids = [i.id for i in session.scalars(select(ExpenseItem).where(ExpenseItem.claim_id == claim.id))]
+    item_ids = [
+        i.id
+        for i in session.scalars(select(ExpenseItem).where(ExpenseItem.claim_id == claim.id))
+    ]
     if item_ids:
         session.execute(ExpenseItemEvidence.__table__.delete().where(ExpenseItemEvidence.expense_item_id.in_(item_ids)))
 
     # Get source file IDs for evidence cleanup
-    source_ids = [s.id for s in session.scalars(select(SourceFile).where(SourceFile.claim_id == claim.id))]
+    source_ids = [
+        s.id
+        for s in session.scalars(select(SourceFile).where(SourceFile.claim_id == claim.id))
+    ]
     if source_ids:
         session.execute(EvidenceDocument.__table__.delete().where(EvidenceDocument.source_file_id.in_(source_ids)))
 
@@ -149,24 +155,38 @@ def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
 
     evaluate_claim(session, claim_id=claim.id)
 
-    blocking = list(
+    open_violations = list(
         session.scalars(
             select(PolicyViolation).where(
                 PolicyViolation.claim_id == claim.id,
                 PolicyViolation.status == ViolationStatus.OPEN,
-                PolicyViolation.severity == PolicySeverity.FAIL,
             )
         )
     )
+    blocking = [
+        v
+        for v in open_violations
+        if v.severity == PolicySeverity.FAIL or bool((v.data_json or {}).get("submit_blocking"))
+    ]
     if blocking:
         claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
         session.add(claim)
         session.commit()
+        blocking_rules = sorted({v.rule_id for v in blocking})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
-                "message": "Claim has blocking policy failures and cannot be submitted.",
-                "blocking_rules": [v.rule_id for v in blocking],
+                "message": "Claim has blocking policy items and cannot be submitted.",
+                "blocking_rules": blocking_rules,
+                "blocking": [
+                    {
+                        "rule_id": v.rule_id,
+                        "severity": v.severity.value,
+                        "title": v.title,
+                        "message": v.message,
+                    }
+                    for v in blocking
+                ],
             },
         )
 
