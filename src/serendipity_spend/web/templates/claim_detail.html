@@ -106,22 +106,30 @@
               </svg>
               <span>Drop files or click to browse</span>
             </div>
-            <input id="file-input" type="file" name="uploads" multiple accept=".pdf,.zip,.eml,image/*" required style="display:none;" />
+            <input id="file-input" type="file" name="uploads" multiple accept=".pdf,.zip,.eml,.msg,image/*,message/rfc822" style="display:none;" />
+            <div id="selected-files" class="selected-files"></div>
             <button class="btn btn-sm mt-1" type="submit">Upload</button>
           </form>
           <script>
             (function() {
               const dz = document.getElementById('dropzone');
               const input = document.getElementById('file-input');
+              const selected = document.getElementById('selected-files');
               if (!dz || !input) return;
               dz.addEventListener('click', () => input.click());
               dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dropzone--active'); });
               dz.addEventListener('dragleave', () => dz.classList.remove('dropzone--active'));
-              dz.addEventListener('drop', (e) => { e.preventDefault(); dz.classList.remove('dropzone--active'); if (e.dataTransfer?.files) input.files = e.dataTransfer.files; });
-              input.addEventListener('change', () => {
-                const span = dz.querySelector('span');
-                if (span) span.textContent = input.files?.length ? `${input.files.length} file(s) selected` : 'Drop files or click to browse';
-              });
+              dz.addEventListener('drop', (e) => { e.preventDefault(); dz.classList.remove('dropzone--active'); if (e.dataTransfer?.files) input.files = e.dataTransfer.files; updateFileList(); });
+              input.addEventListener('change', updateFileList);
+              function updateFileList() {
+                if (!selected) return;
+                const files = Array.from(input.files || []);
+                if (files.length === 0) {
+                  selected.innerHTML = '';
+                  return;
+                }
+                selected.innerHTML = files.map(f => `<div class="selected-file">${f.name} <span class="muted">(${(f.size/1024).toFixed(1)} KB)</span></div>`).join('');
+              }
             })();
           </script>
           {% if docs|length > 0 %}
@@ -368,6 +376,8 @@ details.step-card > .step-header { list-style:none; }
 .dropzone { border:2px dashed var(--border-standard); border-radius:var(--radius-sm); padding:24px; text-align:center; cursor:pointer; background:var(--bg-elevated); display:flex; flex-direction:column; align-items:center; gap:8px; color:var(--text-muted); font-size:13px; transition:all 0.15s; }
 .dropzone:hover, .dropzone--active { border-color:var(--accent); background:var(--accent-bg); }
 .dropzone svg { opacity:0.4; }
+.selected-files { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+.selected-file { font-size:12px; padding:6px 10px; background:var(--accent-bg); border-radius:4px; color:var(--text-primary); }
 
 .file-list { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
 .file-item { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--bg-elevated); border-radius:6px; font-size:13px; }
