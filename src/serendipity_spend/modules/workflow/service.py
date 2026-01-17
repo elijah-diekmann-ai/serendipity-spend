@@ -7,9 +7,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from serendipity_spend.core.logging import get_logger, log_event
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.identity.models import User, UserRole
 from serendipity_spend.modules.workflow.models import Approval, ApprovalDecision, Task, TaskStatus
+
+logger = get_logger(__name__)
 
 
 def list_tasks(session: Session, *, claim_id: uuid.UUID) -> list[Task]:
@@ -45,6 +48,15 @@ def resolve_task(session: Session, *, task_id: uuid.UUID, user: User) -> Task:
     session.add(task)
     session.commit()
     session.refresh(task)
+    log_event(
+        logger,
+        "workflow.task.resolved",
+        claim_id=str(task.claim_id),
+        task_id=str(task.id),
+        expense_item_id=str(task.expense_item_id) if task.expense_item_id else None,
+        task_type=task.type,
+        resolved_by_user_id=str(user.id),
+    )
     return task
 
 
@@ -101,6 +113,7 @@ def approve_claim(
             )
 
     now = datetime.now(UTC)
+    prev_status = claim.status
     if decision == ApprovalDecision.APPROVED:
         claim.status = ClaimStatus.APPROVED
         claim.approved_at = now
@@ -119,4 +132,13 @@ def approve_claim(
     session.add_all([claim, approval])
     session.commit()
     session.refresh(claim)
+    if prev_status != claim.status:
+        log_event(
+            logger,
+            "claim.status.changed",
+            claim_id=str(claim.id),
+            from_status=prev_status.value,
+            to_status=claim.status.value,
+            reason="approve_claim",
+        )
     return claim

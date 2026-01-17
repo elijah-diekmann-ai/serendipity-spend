@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.db import db_session
+from serendipity_spend.core.logging import set_user_context
 from serendipity_spend.core.security import decode_access_token
 from serendipity_spend.modules.identity.google_oauth import google_oauth_enabled
 from serendipity_spend.modules.identity.models import User, UserRole
@@ -41,6 +42,7 @@ def get_current_user(
         f"@{allowed_domain}"
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user")
+    set_user_context(str(user.id))
     return user
 
 

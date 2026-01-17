@@ -17,6 +17,7 @@ from starlette.datastructures import URL
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.currencies import all_currency_codes, normalize_currency
 from serendipity_spend.core.db import db_session
+from serendipity_spend.core.logging import get_logger, log_event, set_user_context
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import ClaimStatus
@@ -76,6 +77,7 @@ router = APIRouter(include_in_schema=False)
 
 # Static files path for mounting in main.py
 STATIC_DIR = WEB_DIR / "static"
+logger = get_logger(__name__)
 
 
 def _external_url(request: Request, url: URL) -> str:
@@ -114,6 +116,7 @@ def _get_optional_user(request: Request, session: Session) -> User | None:
         f"@{allowed_domain}"
     ):
         return None
+    set_user_context(str(user.id))
     return user
 
 
@@ -849,6 +852,14 @@ async def upload_document_ui(
     batch = uploads or ([upload] if upload is not None else [])
     for f in batch:
         body = await f.read()
+        log_event(
+            logger,
+            "upload.received",
+            claim_id=str(claim.id),
+            filename=f.filename or "upload.bin",
+            content_type=f.content_type,
+            byte_size=len(body),
+        )
         sources = create_source_files_from_upload(
             session,
             claim=claim,
@@ -858,7 +869,15 @@ async def upload_document_ui(
             body=body,
         )
         for source in sources:
-            extract_source_file_task.delay(str(source.id))
+            async_result = extract_source_file_task.delay(str(source.id))
+            log_event(
+                logger,
+                "celery.task.enqueued",
+                task_name="extract_source_file",
+                celery_task_id=async_result.id,
+                claim_id=str(claim.id),
+                source_file_id=str(source.id),
+            )
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
@@ -1119,7 +1138,15 @@ def create_export_ui(
         return RedirectResponse(url="/login", status_code=303)
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     run = create_export_run(claim_id=claim.id, requested_by_user_id=user.id)
-    generate_export_task.delay(str(run.id))
+    async_result = generate_export_task.delay(str(run.id))
+    log_event(
+        logger,
+        "celery.task.enqueued",
+        task_name="generate_export",
+        celery_task_id=async_result.id,
+        claim_id=str(claim.id),
+        export_run_id=str(run.id),
+    )
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 

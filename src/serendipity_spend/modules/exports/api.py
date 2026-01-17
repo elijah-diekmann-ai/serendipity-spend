@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from serendipity_spend.api.deps import get_current_user
 from serendipity_spend.core.db import db_session
+from serendipity_spend.core.logging import get_logger, log_event
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.service import get_claim_for_user
 from serendipity_spend.modules.exports.models import ExportRun
@@ -18,6 +19,7 @@ from serendipity_spend.modules.identity.models import User
 from serendipity_spend.worker.tasks import generate_export_task
 
 router = APIRouter(tags=["exports"])
+logger = get_logger(__name__)
 
 
 @router.post("/claims/{claim_id}/exports", response_model=ExportRunOut)
@@ -28,7 +30,15 @@ def create_export(
 ) -> ExportRunOut:
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     run = create_export_run(claim_id=claim.id, requested_by_user_id=user.id)
-    generate_export_task.delay(str(run.id))
+    async_result = generate_export_task.delay(str(run.id))
+    log_event(
+        logger,
+        "celery.task.enqueued",
+        task_name="generate_export",
+        celery_task_id=async_result.id,
+        claim_id=str(claim.id),
+        export_run_id=str(run.id),
+    )
     return ExportRunOut.model_validate(run, from_attributes=True)
 
 
