@@ -84,3 +84,35 @@ def test_parse_receipt_with_ai_requires_total_provenance(monkeypatch):
             extraction_method="ai_test",
         )
         assert parsed is None
+
+
+def test_parse_receipt_with_ai_supports_comma_decimal_totals(monkeypatch):
+    from serendipity_spend.modules.extraction import service as extraction_service
+
+    monkeypatch.setattr(extraction_service, "receipt_ai_available", lambda: True)
+    monkeypatch.setattr(
+        extraction_service,
+        "extract_receipt_fields",
+        lambda _text: {
+            "total": {
+                "amount": "10,00",
+                "currency": "EUR",
+                "confidence": 0.9,
+                "evidence_lines": [2],
+            }
+        },
+    )
+
+    text = "Test Hotel\nTotal EUR 10,00\n"
+    text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    with SessionLocal() as session:
+        parsed = extraction_service._parse_receipt_with_ai(
+            session=session,
+            text=text,
+            text_hash=text_hash,
+            extraction_method="ai_test",
+        )
+        assert parsed is not None
+        assert parsed.currency == "EUR"
+        assert parsed.amount == Decimal("10.00")
