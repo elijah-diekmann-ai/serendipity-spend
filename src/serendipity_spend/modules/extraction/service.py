@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -16,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.currencies import normalize_currency
 from serendipity_spend.core.db import SessionLocal
+from serendipity_spend.core.logging import get_logger, log_event, log_exception, monotonic_ms
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.documents.models import (
@@ -39,6 +41,8 @@ from serendipity_spend.modules.extraction.parsers.united_wifi import parse_unite
 from serendipity_spend.modules.fx.models import FxRate
 from serendipity_spend.modules.workflow.models import Task, TaskStatus
 
+logger = get_logger(__name__)
+
 
 @dataclass(frozen=True)
 class Segment:
@@ -60,6 +64,20 @@ def extract_source_file(*, source_file_id: str) -> None:
         if not claim:
             return
 
+        start = time.monotonic()
+        log_event(
+            logger,
+            "extraction.start",
+            source_file_id=str(source.id),
+            claim_id=str(claim.id),
+            filename=source.filename,
+            content_type=source.content_type,
+            byte_size=source.byte_size,
+            sha256=source.sha256,
+            storage_key=source.storage_key,
+            source_status=source.status.value,
+        )
+
         if source.status == SourceFileStatus.PROCESSED:
             return
 
@@ -74,6 +92,15 @@ def extract_source_file(*, source_file_id: str) -> None:
                 filename=source.filename,
                 content_type=source.content_type,
                 body=body,
+            )
+            log_event(
+                logger,
+                "extraction.file_kind",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                filename=source.filename,
+                content_type=source.content_type,
+                kind=kind,
             )
             if kind == "bad_pdf_upload":
                 _sync_extraction_task(
@@ -92,9 +119,27 @@ def extract_source_file(*, source_file_id: str) -> None:
                 source.error_message = "Bad upload: expected PDF header (%PDF)"
                 session.add(source)
                 if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                    prev_status = claim.status
                     claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
                     session.add(claim)
+                    log_event(
+                        logger,
+                        "claim.status.changed",
+                        claim_id=str(claim.id),
+                        from_status=prev_status.value,
+                        to_status=claim.status.value,
+                        reason="extraction_bad_pdf_upload",
+                    )
                 session.commit()
+                log_event(
+                    logger,
+                    "extraction.finish",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    status="failed",
+                    reason="bad_pdf_upload",
+                    duration_ms=monotonic_ms(start),
+                )
                 return
 
             if kind == "pdf":
@@ -119,9 +164,27 @@ def extract_source_file(*, source_file_id: str) -> None:
                 source.error_message = "Unsupported file type"
                 session.add(source)
                 if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                    prev_status = claim.status
                     claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
                     session.add(claim)
+                    log_event(
+                        logger,
+                        "claim.status.changed",
+                        claim_id=str(claim.id),
+                        from_status=prev_status.value,
+                        to_status=claim.status.value,
+                        reason="extraction_unsupported_upload",
+                    )
                 session.commit()
+                log_event(
+                    logger,
+                    "extraction.finish",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    status="failed",
+                    reason="unsupported_upload",
+                    duration_ms=monotonic_ms(start),
+                )
                 return
 
             from serendipity_spend.modules.policy.service import evaluate_claim
@@ -132,10 +195,27 @@ def extract_source_file(*, source_file_id: str) -> None:
             session.add(source)
 
             if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                prev_status = claim.status
                 claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
                 session.add(claim)
+                log_event(
+                    logger,
+                    "claim.status.changed",
+                    claim_id=str(claim.id),
+                    from_status=prev_status.value,
+                    to_status=claim.status.value,
+                    reason="extraction_complete",
+                )
 
             session.commit()
+            log_event(
+                logger,
+                "extraction.finish",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                status="success",
+                duration_ms=monotonic_ms(start),
+            )
         except Exception as e:  # noqa: BLE001
             _sync_extraction_task(
                 session=session,
@@ -152,9 +232,25 @@ def extract_source_file(*, source_file_id: str) -> None:
             source.error_message = str(e)
             session.add(source)
             if claim.status in {ClaimStatus.DRAFT, ClaimStatus.PROCESSING}:
+                prev_status = claim.status
                 claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
                 session.add(claim)
+                log_event(
+                    logger,
+                    "claim.status.changed",
+                    claim_id=str(claim.id),
+                    from_status=prev_status.value,
+                    to_status=claim.status.value,
+                    reason="extraction_error",
+                )
             session.commit()
+            log_exception(
+                logger,
+                "extraction.error",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                duration_ms=monotonic_ms(start),
+            )
 
 
 def _try_start_source_processing(*, session, source: SourceFile) -> bool:
@@ -194,7 +290,15 @@ def _cleanup_source_file_evidence(*, session, source_id: uuid.UUID) -> None:
 
 
 def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: bytes) -> None:
-    pages = _extract_pdf_pages(body)
+    pages, ocr_pages = _extract_pdf_pages(body)
+    log_event(
+        logger,
+        "extraction.pdf.pages",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        page_count=len(pages),
+        ocr_pages=ocr_pages,
+    )
     if not pages:
         _sync_extraction_task(
             session=session,
@@ -211,6 +315,18 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
         return
 
     segments = _segment_pdf_pages(pages)
+    segments_by_type: dict[str, int] = {}
+    for seg in segments:
+        key = f"{seg.vendor}:{seg.receipt_type}"
+        segments_by_type[key] = segments_by_type.get(key, 0) + 1
+    log_event(
+        logger,
+        "extraction.pdf.segments",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        segments_total=len(segments),
+        segments_by_type=segments_by_type,
+    )
     if not segments and pages:
         _process_unknown_pdf(session=session, claim=claim, source=source, pages=pages)
         return
@@ -234,19 +350,50 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
         session.add(evidence)
         session.flush()
 
+        parser_used = None
         parsed = _parse_segment(seg=seg, pages=pages)
-        if not parsed:
+        if parsed:
+            parser_used = f"vendor:{seg.vendor}"
+        else:
             parsed = _parse_receipt_with_ai(
                 session=session,
                 text=seg_text,
                 text_hash=text_hash,
                 extraction_method="ai_fallback",
             )
+            if parsed:
+                parser_used = "ai_fallback"
         if not parsed:
             parsed = _parse_generic_receipt(seg_text, extraction_method="generic_fallback")
+            if parsed:
+                parser_used = "generic_fallback"
         if not parsed:
             failed_segments.append(seg)
+            log_event(
+                logger,
+                "extraction.segment.unparsed",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                evidence_document_id=str(evidence.id),
+                vendor=seg.vendor,
+                receipt_type=seg.receipt_type,
+                page_start=seg.start_page_idx + 1,
+                page_end=seg.end_page_idx + 1,
+            )
             continue
+
+        log_event(
+            logger,
+            "extraction.segment.parsed",
+            source_file_id=str(source.id),
+            claim_id=str(claim.id),
+            evidence_document_id=str(evidence.id),
+            vendor=parsed.vendor,
+            receipt_type=parsed.receipt_type,
+            parser_used=parser_used,
+            page_start=seg.start_page_idx + 1,
+            page_end=seg.end_page_idx + 1,
+        )
 
         _upsert_item_and_link_evidence(
             session=session,
@@ -307,6 +454,17 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
             ),
         )
 
+    log_event(
+        logger,
+        "extraction.pdf.summary",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        parsed_segments=parsed_count,
+        parsed_uncovered=parsed_uncovered,
+        failed_segments=len(failed_segments),
+        unhandled_pages=len(unhandled_uncovered),
+        total_parsed=total_parsed,
+    )
     session.commit()
 
 
@@ -314,7 +472,18 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
     text = _ocr_image_bytes(body)
     vendor, receipt_type, confidence = _classify_text(text)
     text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    log_event(
+        logger,
+        "extraction.image.classified",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        vendor=vendor,
+        receipt_type=receipt_type,
+        confidence=confidence,
+        text_length=len(text),
+    )
 
+    parser_used = None
     parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
     if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
         parsed = _parse_receipt_with_ai(
@@ -323,9 +492,15 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
             text_hash=text_hash,
             extraction_method="ai_image",
         )
+        if parsed:
+            parser_used = "ai_image"
     if not parsed:
         parsed = _parse_generic_receipt(text)
+        if parsed:
+            parser_used = "generic"
     if parsed:
+        if not parser_used:
+            parser_used = "vendor"
         if vendor == "Unknown":
             vendor = parsed.vendor
         if receipt_type == "unknown":
@@ -345,6 +520,15 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
     session.add(evidence)
     session.flush()
     if not parsed:
+        log_event(
+            logger,
+            "extraction.image.unparsed",
+            source_file_id=str(source.id),
+            claim_id=str(claim.id),
+            evidence_document_id=str(evidence.id),
+            vendor=vendor,
+            receipt_type=receipt_type,
+        )
         _sync_extraction_task(
             session=session,
             claim=claim,
@@ -359,6 +543,16 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         session.commit()
         return
 
+    log_event(
+        logger,
+        "extraction.image.parsed",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        evidence_document_id=str(evidence.id),
+        vendor=parsed.vendor,
+        receipt_type=parsed.receipt_type,
+        parser_used=parser_used,
+    )
     _upsert_item_and_link_evidence(
         session=session,
         claim=claim,
@@ -394,7 +588,18 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
 
     vendor, receipt_type, confidence = _classify_text(text)
     text_hash = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    log_event(
+        logger,
+        "extraction.text.classified",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        vendor=vendor,
+        receipt_type=receipt_type,
+        confidence=confidence,
+        text_length=len(text),
+    )
 
+    parser_used = None
     parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
     if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
         parsed = _parse_receipt_with_ai(
@@ -403,13 +608,19 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
             text_hash=text_hash,
             extraction_method="ai_text",
         )
+        if parsed:
+            parser_used = "ai_text"
     if not parsed:
         parsed = _parse_generic_receipt(text, extraction_method="generic")
+        if parsed:
+            parser_used = "generic"
 
     if parsed and vendor == "Unknown":
         vendor = parsed.vendor
         receipt_type = parsed.receipt_type
         confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
+    if parsed and not parser_used:
+        parser_used = "vendor"
 
     evidence = EvidenceDocument(
         source_file_id=source.id,
@@ -425,6 +636,15 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
     session.flush()
 
     if not parsed:
+        log_event(
+            logger,
+            "extraction.text.unparsed",
+            source_file_id=str(source.id),
+            claim_id=str(claim.id),
+            evidence_document_id=str(evidence.id),
+            vendor=vendor,
+            receipt_type=receipt_type,
+        )
         _sync_extraction_task(
             session=session,
             claim=claim,
@@ -436,6 +656,16 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         session.commit()
         return
 
+    log_event(
+        logger,
+        "extraction.text.parsed",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        evidence_document_id=str(evidence.id),
+        vendor=parsed.vendor,
+        receipt_type=parsed.receipt_type,
+        parser_used=parser_used,
+    )
     _upsert_item_and_link_evidence(
         session=session,
         claim=claim,
@@ -567,15 +797,17 @@ def _html_to_text(html: str) -> str:
     return "\n".join([ln for ln in lines if ln])
 
 
-def _extract_pdf_pages(body: bytes) -> list[str]:
+def _extract_pdf_pages(body: bytes) -> tuple[list[str], int]:
     reader = PdfReader(BytesIO(body))
     pages: list[str] = []
+    ocr_pages = 0
     for page in reader.pages:
         text = (page.extract_text() or "").replace("\u202f", " ").replace("\xa0", " ")
         if not text.strip():
+            ocr_pages += 1
             text = _ocr_pdf_page(page).replace("\u202f", " ").replace("\xa0", " ") or text
         pages.append(text)
-    return pages
+    return pages, ocr_pages
 
 
 def _ocr_pdf_page(page) -> str:
@@ -782,7 +1014,9 @@ def _upsert_item_and_link_evidence(
             ExpenseItem.dedupe_key == dedupe_key,
         )
     )
+    action = "existing"
     if not item:
+        action = "created"
         item = ExpenseItem(
             claim_id=claim.id,
             vendor=parsed.vendor,
@@ -805,6 +1039,7 @@ def _upsert_item_and_link_evidence(
                 session.add(item)
                 session.flush()
         except IntegrityError:
+            action = "dedupe_conflict"
             item = session.scalar(
                 select(ExpenseItem).where(
                     ExpenseItem.claim_id == claim.id,
@@ -823,6 +1058,18 @@ def _upsert_item_and_link_evidence(
     if not existing_link:
         session.add(ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id))
 
+    log_event(
+        logger,
+        "expense_item.upsert",
+        claim_id=str(claim.id),
+        expense_item_id=str(item.id),
+        evidence_document_id=str(evidence.id),
+        source_file_id=str(evidence.source_file_id),
+        dedupe_key=dedupe_key,
+        vendor=parsed.vendor,
+        vendor_reference=parsed.vendor_reference,
+        action=action,
+    )
     return item
 
 
@@ -868,6 +1115,14 @@ def _process_unknown_pdf(*, session, claim: Claim, source: SourceFile, pages: li
                 "Add a line item manually or upload a more standard receipt/invoice."
             ),
         )
+    log_event(
+        logger,
+        "extraction.pdf.unknown.summary",
+        source_file_id=str(source.id),
+        claim_id=str(claim.id),
+        parsed_items=parsed_items,
+        unhandled_pages=len(unhandled),
+    )
     session.commit()
 
 
@@ -939,6 +1194,7 @@ def _process_page_ranges(
             page_text_hash = hashlib.sha256(
                 page_text.encode("utf-8", errors="ignore")
             ).hexdigest()
+            parser_used = None
             parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
             if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
                 parsed = _parse_receipt_with_ai(
@@ -947,10 +1203,16 @@ def _process_page_ranges(
                     text_hash=page_text_hash,
                     extraction_method="ai_page",
                 )
+                if parsed:
+                    parser_used = "ai_page"
             if not parsed:
                 parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
+                if parsed:
+                    parser_used = "generic_page"
 
             if parsed:
+                if not parser_used:
+                    parser_used = "vendor"
                 if vendor == "Unknown":
                     vendor = parsed.vendor
                 if receipt_type == "unknown":
@@ -970,6 +1232,18 @@ def _process_page_ranges(
                 confidence=confidence if parsed else 0.0,
             )
             if parsed:
+                log_event(
+                    logger,
+                    "extraction.page.parsed",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    evidence_document_id=str(evidence.id),
+                    page_start=start + 1,
+                    page_end=start + 1,
+                    vendor=parsed.vendor,
+                    receipt_type=parsed.receipt_type,
+                    parser_used=parser_used,
+                )
                 _upsert_item_and_link_evidence(
                     session=session,
                     claim=claim,
@@ -979,16 +1253,26 @@ def _process_page_ranges(
                 )
                 parsed_items += 1
             else:
+                log_event(
+                    logger,
+                    "extraction.page.unparsed",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    evidence_document_id=str(evidence.id),
+                    page_start=start + 1,
+                    page_end=start + 1,
+                )
                 unhandled_page_idxs.append(start)
             continue
 
-        per_page_parsed: list[tuple[int, object, str, str, float]] = []
+        per_page_parsed: list[tuple[int, object, str, str, float, str]] = []
         for idx in range(start, end + 1):
             page_text = pages[idx]
             vendor, receipt_type, confidence = _classify_text(page_text)
             page_text_hash = hashlib.sha256(
                 page_text.encode("utf-8", errors="ignore")
             ).hexdigest()
+            parser_used = None
             parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
             if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
                 parsed = _parse_receipt_with_ai(
@@ -997,8 +1281,12 @@ def _process_page_ranges(
                     text_hash=page_text_hash,
                     extraction_method="ai_page",
                 )
+                if parsed:
+                    parser_used = "ai_page"
             if not parsed:
                 parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
+                if parsed:
+                    parser_used = "generic_page"
             if not parsed:
                 continue
             if vendor == "Unknown":
@@ -1006,11 +1294,13 @@ def _process_page_ranges(
             if receipt_type == "unknown":
                 receipt_type = parsed.receipt_type
             confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
-            per_page_parsed.append((idx, parsed, vendor, receipt_type, confidence))
+            if not parser_used:
+                parser_used = "vendor"
+            per_page_parsed.append((idx, parsed, vendor, receipt_type, confidence, parser_used))
 
         if len(per_page_parsed) >= 2:
             parsed_by_idx = {idx for idx, *_ in per_page_parsed}
-            for idx, parsed, vendor, receipt_type, confidence in per_page_parsed:
+            for idx, parsed, vendor, receipt_type, confidence, parser_used in per_page_parsed:
                 page_text = pages[idx]
                 evidence, text_hash = _add_evidence_document(
                     session=session,
@@ -1021,6 +1311,18 @@ def _process_page_ranges(
                     receipt_type=receipt_type,
                     extracted_text=page_text,
                     confidence=confidence,
+                )
+                log_event(
+                    logger,
+                    "extraction.page.parsed",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    evidence_document_id=str(evidence.id),
+                    page_start=idx + 1,
+                    page_end=idx + 1,
+                    vendor=parsed.vendor,
+                    receipt_type=parsed.receipt_type,
+                    parser_used=parser_used,
                 )
                 _upsert_item_and_link_evidence(
                     session=session,
@@ -1045,6 +1347,14 @@ def _process_page_ranges(
                     extracted_text=page_text,
                     confidence=0.0,
                 )
+                log_event(
+                    logger,
+                    "extraction.page.unparsed",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    page_start=idx + 1,
+                    page_end=idx + 1,
+                )
                 unhandled_page_idxs.append(idx)
             continue
 
@@ -1053,6 +1363,7 @@ def _process_page_ranges(
         combined_text_hash = hashlib.sha256(
             combined_text.encode("utf-8", errors="ignore")
         ).hexdigest()
+        parser_used = None
         parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=combined_text)
         if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
             parsed = _parse_receipt_with_ai(
@@ -1061,10 +1372,16 @@ def _process_page_ranges(
                 text_hash=combined_text_hash,
                 extraction_method="ai_multi_page",
             )
+            if parsed:
+                parser_used = "ai_multi_page"
         if not parsed:
             parsed = _parse_generic_receipt(combined_text, extraction_method="generic_multi_page")
+            if parsed:
+                parser_used = "generic_multi_page"
 
         if parsed:
+            if not parser_used:
+                parser_used = "vendor"
             if vendor == "Unknown":
                 vendor = parsed.vendor
             if receipt_type == "unknown":
@@ -1080,6 +1397,18 @@ def _process_page_ranges(
                 extracted_text=combined_text,
                 confidence=confidence,
             )
+            log_event(
+                logger,
+                "extraction.page.parsed",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                evidence_document_id=str(evidence.id),
+                page_start=start + 1,
+                page_end=end + 1,
+                vendor=parsed.vendor,
+                receipt_type=parsed.receipt_type,
+                parser_used=parser_used,
+            )
             _upsert_item_and_link_evidence(
                 session=session,
                 claim=claim,
@@ -1091,7 +1420,7 @@ def _process_page_ranges(
             continue
 
         if per_page_parsed:
-            idx, parsed, vendor, receipt_type, confidence = per_page_parsed[0]
+            idx, parsed, vendor, receipt_type, confidence, parser_used = per_page_parsed[0]
             page_text = pages[idx]
             evidence, text_hash = _add_evidence_document(
                 session=session,
@@ -1102,6 +1431,18 @@ def _process_page_ranges(
                 receipt_type=receipt_type,
                 extracted_text=page_text,
                 confidence=confidence,
+            )
+            log_event(
+                logger,
+                "extraction.page.parsed",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                evidence_document_id=str(evidence.id),
+                page_start=idx + 1,
+                page_end=idx + 1,
+                vendor=parsed.vendor,
+                receipt_type=parsed.receipt_type,
+                parser_used=parser_used,
             )
             _upsert_item_and_link_evidence(
                 session=session,
@@ -1125,6 +1466,14 @@ def _process_page_ranges(
                     extracted_text=other_text,
                     confidence=0.0,
                 )
+                log_event(
+                    logger,
+                    "extraction.page.unparsed",
+                    source_file_id=str(source.id),
+                    claim_id=str(claim.id),
+                    page_start=other_idx + 1,
+                    page_end=other_idx + 1,
+                )
                 unhandled_page_idxs.append(other_idx)
             continue
 
@@ -1139,6 +1488,14 @@ def _process_page_ranges(
                 receipt_type="unknown",
                 extracted_text=page_text,
                 confidence=0.0,
+            )
+            log_event(
+                logger,
+                "extraction.page.unparsed",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                page_start=idx + 1,
+                page_end=idx + 1,
             )
             unhandled_page_idxs.append(idx)
 
@@ -2028,6 +2385,17 @@ def _sync_extraction_task(
             resolved_at=None,
         )
         session.add(task)
+        session.flush()
+        log_event(
+            logger,
+            "extraction.task.upsert",
+            claim_id=str(claim.id),
+            task_id=str(task.id),
+            task_type=task.type,
+            task_status=task.status.value,
+            source_file_id=str(source.id),
+            action="created",
+        )
         return
 
     task.title = title
@@ -2039,6 +2407,17 @@ def _sync_extraction_task(
         task.status = TaskStatus.OPEN
         task.resolved_at = None
     session.add(task)
+    session.flush()
+    log_event(
+        logger,
+        "extraction.task.upsert",
+        claim_id=str(claim.id),
+        task_id=str(task.id),
+        task_type=task.type,
+        task_status=task.status.value,
+        source_file_id=str(source.id),
+        action="updated",
+    )
 
 
 def _is_supported_image(filename: str, content_type: str | None) -> bool:

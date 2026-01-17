@@ -10,3 +10,7 @@ __pycache__/
 .local_storage/
 .tmp_storage_test/
 
+# Local access notes (do not deploy)
+access.md
+access.MD
+email.md

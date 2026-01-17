@@ -8,10 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from serendipity_spend.core.currencies import normalize_currency
+from serendipity_spend.core.logging import get_logger, log_event
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.identity.models import User, UserRole
 from serendipity_spend.modules.policy.blocking import is_violation_blocking
 from serendipity_spend.modules.policy.models import PolicyViolation, ViolationStatus
+
+logger = get_logger(__name__)
 
 
 def create_claim(session: Session, *, employee_id: uuid.UUID, home_currency: str) -> Claim:
@@ -30,6 +33,14 @@ def create_claim(session: Session, *, employee_id: uuid.UUID, home_currency: str
     session.add(claim)
     session.commit()
     session.refresh(claim)
+    log_event(
+        logger,
+        "claim.created",
+        claim_id=str(claim.id),
+        employee_id=str(claim.employee_id),
+        home_currency=claim.home_currency,
+        status=claim.status.value,
+    )
     return claim
 
 
@@ -109,12 +120,22 @@ def route_claim(session: Session, *, claim: Claim, approver_id: uuid.UUID) -> Cl
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="User is not an approver"
         )
+    prev_status = claim.status
     claim.approver_id = approver_id
     if claim.status == ClaimStatus.SUBMITTED:
         claim.status = ClaimStatus.NEEDS_APPROVER_REVIEW
     session.add(claim)
     session.commit()
     session.refresh(claim)
+    if prev_status != claim.status:
+        log_event(
+            logger,
+            "claim.status.changed",
+            claim_id=str(claim.id),
+            from_status=prev_status.value,
+            to_status=claim.status.value,
+            reason="route_claim",
+        )
     from serendipity_spend.modules.policy.service import evaluate_claim
 
     evaluate_claim(session, claim_id=claim.id)
@@ -229,9 +250,19 @@ def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
         if is_violation_blocking(v, allow_pending_exceptions=True)
     ]
     if blocking:
+        prev_status = claim.status
         claim.status = ClaimStatus.NEEDS_EMPLOYEE_REVIEW
         session.add(claim)
         session.commit()
+        if prev_status != claim.status:
+            log_event(
+                logger,
+                "claim.status.changed",
+                claim_id=str(claim.id),
+                from_status=prev_status.value,
+                to_status=claim.status.value,
+                reason="submit_blocked",
+            )
         blocking_rules = sorted({v.rule_id for v in blocking})
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -273,11 +304,21 @@ def submit_claim(session: Session, *, claim: Claim, user: User) -> Claim:
             if len(admins) == 1:
                 claim.approver_id = admins[0].id
 
+    prev_status = claim.status
     claim.status = ClaimStatus.NEEDS_APPROVER_REVIEW if claim.approver_id else ClaimStatus.SUBMITTED
 
     session.add(claim)
     session.commit()
     session.refresh(claim)
+    if prev_status != claim.status:
+        log_event(
+            logger,
+            "claim.status.changed",
+            claim_id=str(claim.id),
+            from_status=prev_status.value,
+            to_status=claim.status.value,
+            reason="submit_claim",
+        )
 
     # Re-evaluate after routing so policy tasks can be assigned to approver
     # (e.g. exception requests).

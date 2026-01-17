@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import re
+import time
 import uuid
 from copy import copy
 from datetime import UTC, date, datetime
@@ -12,6 +13,7 @@ from pypdf import PdfReader, PdfWriter
 from sqlalchemy import select
 
 from serendipity_spend.core.db import SessionLocal
+from serendipity_spend.core.logging import get_logger, log_event, log_exception, monotonic_ms
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import Claim
 from serendipity_spend.modules.documents.models import EvidenceDocument, SourceFile
@@ -20,6 +22,8 @@ from serendipity_spend.modules.exports.models import ExportRun, ExportStatus
 from serendipity_spend.modules.identity.models import User
 from serendipity_spend.modules.policy.models import PolicyViolation, ViolationStatus
 from serendipity_spend.modules.policy.service import evaluate_claim
+
+logger = get_logger(__name__)
 
 
 def create_export_run(*, claim_id: uuid.UUID, requested_by_user_id: uuid.UUID) -> ExportRun:
@@ -37,6 +41,14 @@ def create_export_run(*, claim_id: uuid.UUID, requested_by_user_id: uuid.UUID) -
         session.add(run)
         session.commit()
         session.refresh(run)
+        log_event(
+            logger,
+            "export.run.created",
+            claim_id=str(run.claim_id),
+            export_run_id=str(run.id),
+            requested_by_user_id=str(run.requested_by_user_id),
+            status=run.status.value,
+        )
         return run
 
 
@@ -51,6 +63,13 @@ def generate_export(*, export_run_id: str) -> None:
         session.add(run)
         session.commit()
 
+        start = time.monotonic()
+        log_event(
+            logger,
+            "export.generate.start",
+            export_run_id=str(run.id),
+            claim_id=str(run.claim_id),
+        )
         try:
             claim = session.scalar(select(Claim).where(Claim.id == run.claim_id))
             if not claim:
@@ -100,11 +119,28 @@ def generate_export(*, export_run_id: str) -> None:
             run.completed_at = datetime.now(UTC)
             session.add(run)
             session.commit()
+            log_event(
+                logger,
+                "export.generate.finish",
+                export_run_id=str(run.id),
+                claim_id=str(run.claim_id),
+                status=run.status.value,
+                summary_key=run.summary_xlsx_key,
+                supporting_key=run.supporting_pdf_key,
+                duration_ms=monotonic_ms(start),
+            )
         except Exception as e:  # noqa: BLE001
             run.status = ExportStatus.FAILED
             run.error_message = str(e)
             session.add(run)
             session.commit()
+            log_exception(
+                logger,
+                "export.generate.error",
+                export_run_id=str(run.id),
+                claim_id=str(run.claim_id),
+                duration_ms=monotonic_ms(start),
+            )
 
 
 def _build_reimbursement_xlsx(

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import boto3
 
 from serendipity_spend.core.config import settings
+from serendipity_spend.core.logging import get_logger, log_event, log_exception, monotonic_ms
+
+logger = get_logger(__name__)
 
 
 class StorageError(RuntimeError):
@@ -36,21 +40,68 @@ class LocalObjectStorage(ObjectStorage):
         self._root.mkdir(parents=True, exist_ok=True)
 
     def put(self, *, key: str, body: bytes) -> StoredObject:
+        start = time.monotonic()
         path = self._root / key
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(body)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        except Exception:
+            log_exception(
+                logger,
+                "storage.put.failure",
+                backend="local",
+                storage_key=key,
+                byte_size=len(body),
+            )
+            raise
+        log_event(
+            logger,
+            "storage.put.success",
+            backend="local",
+            storage_key=key,
+            byte_size=len(body),
+            duration_ms=monotonic_ms(start),
+        )
         return StoredObject(key=key, byte_size=len(body))
 
     def get(self, *, key: str) -> bytes:
+        start = time.monotonic()
         path = self._root / key
         if not path.exists():
+            log_event(
+                logger,
+                "storage.get.failure",
+                backend="local",
+                storage_key=key,
+                duration_ms=monotonic_ms(start),
+            )
             raise StorageError(f"Object not found: {key}")
-        return path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except Exception:
+            log_exception(
+                logger,
+                "storage.get.failure",
+                backend="local",
+                storage_key=key,
+                duration_ms=monotonic_ms(start),
+            )
+            raise
+        return data
 
     def delete(self, *, key: str) -> None:
         path = self._root / key
         if path.exists():
-            path.unlink()
+            try:
+                path.unlink()
+            except Exception:
+                log_exception(
+                    logger,
+                    "storage.delete.failure",
+                    backend="local",
+                    storage_key=key,
+                )
+                raise
 
 
 class S3ObjectStorage(ObjectStorage):
@@ -73,18 +124,64 @@ class S3ObjectStorage(ObjectStorage):
             self._client.create_bucket(Bucket=self._bucket)
 
     def put(self, *, key: str, body: bytes) -> StoredObject:
-        self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
+        start = time.monotonic()
+        try:
+            self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
+        except Exception:
+            log_exception(
+                logger,
+                "storage.put.failure",
+                backend="s3",
+                storage_key=key,
+                byte_size=len(body),
+            )
+            raise
+        log_event(
+            logger,
+            "storage.put.success",
+            backend="s3",
+            storage_key=key,
+            byte_size=len(body),
+            duration_ms=monotonic_ms(start),
+        )
         return StoredObject(key=key, byte_size=len(body))
 
     def get(self, *, key: str) -> bytes:
+        start = time.monotonic()
         try:
             resp = self._client.get_object(Bucket=self._bucket, Key=key)
         except Exception as e:  # noqa: BLE001
+            log_exception(
+                logger,
+                "storage.get.failure",
+                backend="s3",
+                storage_key=key,
+                duration_ms=monotonic_ms(start),
+            )
             raise StorageError(f"Object not found: {key}") from e
-        return resp["Body"].read()
+        try:
+            return resp["Body"].read()
+        except Exception:
+            log_exception(
+                logger,
+                "storage.get.failure",
+                backend="s3",
+                storage_key=key,
+                duration_ms=monotonic_ms(start),
+            )
+            raise
 
     def delete(self, *, key: str) -> None:
-        self._client.delete_object(Bucket=self._bucket, Key=key)
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=key)
+        except Exception:
+            log_exception(
+                logger,
+                "storage.delete.failure",
+                backend="s3",
+                storage_key=key,
+            )
+            raise
 
 
 _storage: ObjectStorage | None = None

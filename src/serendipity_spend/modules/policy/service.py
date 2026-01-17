@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from serendipity_spend.core.currencies import is_iso4217_currency
+from serendipity_spend.core.logging import get_logger, log_event
 from serendipity_spend.modules.claims.models import Claim
 from serendipity_spend.modules.expenses.models import ExpenseItem
 from serendipity_spend.modules.fx.models import FxRate
@@ -23,6 +24,8 @@ from serendipity_spend.modules.policy.models import (
     ViolationStatus,
 )
 from serendipity_spend.modules.workflow.models import Task, TaskStatus
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,13 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
         session.scalars(select(PolicyException).where(PolicyException.claim_id == claim.id))
     )
     exceptions_by_key = {e.dedupe_key: e for e in exceptions}
+    log_event(
+        logger,
+        "policy.evaluate.start",
+        claim_id=str(claim.id),
+        items_count=len(items),
+        exceptions_count=len(exceptions),
+    )
 
     issues: list[Issue] = []
 
@@ -392,8 +402,20 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                         )
                     )
 
+    issues_by_severity: dict[str, int] = {}
+    for issue in issues:
+        key = issue.severity.value
+        issues_by_severity[key] = issues_by_severity.get(key, 0) + 1
+
     _sync_violations(session=session, claim_id=claim.id, issues=issues)
     _sync_tasks(session=session, claim=claim, issues=issues)
+    log_event(
+        logger,
+        "policy.evaluate.summary",
+        claim_id=str(claim.id),
+        issues_total=len(issues),
+        issues_by_severity=issues_by_severity,
+    )
 
 
 def _amount_usd(*, item: ExpenseItem, claim: Claim, usd_to_home: Decimal | None) -> Decimal | None:
@@ -423,6 +445,9 @@ def _sync_violations(*, session: Session, claim_id: uuid.UUID, issues: list[Issu
         session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim_id))
     )
     existing_by_key = {v.dedupe_key: v for v in existing}
+    created: list[PolicyViolation] = []
+    updated: list[PolicyViolation] = []
+    resolved: list[PolicyViolation] = []
 
     for key, issue in desired.items():
         v = existing_by_key.get(key)
@@ -441,6 +466,7 @@ def _sync_violations(*, session: Session, claim_id: uuid.UUID, issues: list[Issu
                 resolved_at=None,
             )
             session.add(v)
+            created.append(v)
         else:
             v.severity = issue.severity
             v.title = issue.title
@@ -450,6 +476,7 @@ def _sync_violations(*, session: Session, claim_id: uuid.UUID, issues: list[Issu
             v.status = ViolationStatus.OPEN
             v.resolved_at = None
             session.add(v)
+            updated.append(v)
 
     for v in existing:
         if v.dedupe_key in desired:
@@ -459,14 +486,53 @@ def _sync_violations(*, session: Session, claim_id: uuid.UUID, issues: list[Issu
         v.status = ViolationStatus.RESOLVED
         v.resolved_at = now
         session.add(v)
+        resolved.append(v)
 
     session.commit()
+    for v in created:
+        log_event(
+            logger,
+            "policy.violation.upsert",
+            claim_id=str(v.claim_id),
+            policy_violation_id=str(v.id),
+            expense_item_id=str(v.expense_item_id) if v.expense_item_id else None,
+            rule_id=v.rule_id,
+            severity=v.severity.value,
+            status=v.status.value,
+            action="created",
+        )
+    for v in updated:
+        log_event(
+            logger,
+            "policy.violation.upsert",
+            claim_id=str(v.claim_id),
+            policy_violation_id=str(v.id),
+            expense_item_id=str(v.expense_item_id) if v.expense_item_id else None,
+            rule_id=v.rule_id,
+            severity=v.severity.value,
+            status=v.status.value,
+            action="updated",
+        )
+    for v in resolved:
+        log_event(
+            logger,
+            "policy.violation.resolved",
+            claim_id=str(v.claim_id),
+            policy_violation_id=str(v.id),
+            expense_item_id=str(v.expense_item_id) if v.expense_item_id else None,
+            rule_id=v.rule_id,
+            severity=v.severity.value,
+            status=v.status.value,
+        )
 
 
 def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
     now = datetime.now(UTC)
 
     desired_keys: set[tuple[uuid.UUID, uuid.UUID | None, str]] = set()
+    created: list[Task] = []
+    updated: list[Task] = []
+    resolved: list[Task] = []
     for issue in issues:
         exc = (issue.data or {}).get("exception") or {}
         exc_status = str(exc.get("status") or "").upper()
@@ -511,6 +577,7 @@ def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
                 resolved_at=None,
             )
             session.add(task)
+            created.append(task)
         else:
             task.title = issue.title
             task.description = description
@@ -519,6 +586,7 @@ def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
                 task.status = TaskStatus.OPEN
                 task.resolved_at = None
             session.add(task)
+            updated.append(task)
 
     # auto-resolve stale policy tasks
     existing_tasks = list(
@@ -537,8 +605,47 @@ def _sync_tasks(*, session: Session, claim: Claim, issues: list[Issue]) -> None:
         t.status = TaskStatus.RESOLVED
         t.resolved_at = now
         session.add(t)
+        resolved.append(t)
 
     session.commit()
+    for task in created:
+        log_event(
+            logger,
+            "policy.task.upsert",
+            claim_id=str(task.claim_id),
+            task_id=str(task.id),
+            expense_item_id=str(task.expense_item_id) if task.expense_item_id else None,
+            task_type=task.type,
+            task_status=task.status.value,
+            assigned_to_user_id=str(task.assigned_to_user_id)
+            if task.assigned_to_user_id
+            else None,
+            action="created",
+        )
+    for task in updated:
+        log_event(
+            logger,
+            "policy.task.upsert",
+            claim_id=str(task.claim_id),
+            task_id=str(task.id),
+            expense_item_id=str(task.expense_item_id) if task.expense_item_id else None,
+            task_type=task.type,
+            task_status=task.status.value,
+            assigned_to_user_id=str(task.assigned_to_user_id)
+            if task.assigned_to_user_id
+            else None,
+            action="updated",
+        )
+    for task in resolved:
+        log_event(
+            logger,
+            "policy.task.resolved",
+            claim_id=str(task.claim_id),
+            task_id=str(task.id),
+            expense_item_id=str(task.expense_item_id) if task.expense_item_id else None,
+            task_type=task.type,
+            task_status=task.status.value,
+        )
 
 
 def request_policy_exception(

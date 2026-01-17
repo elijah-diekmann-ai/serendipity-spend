@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from serendipity_spend.api.router import router as api_router
 from serendipity_spend.bootstrap import bootstrap
+from serendipity_spend.core.logging import RequestContextMiddleware
 from serendipity_spend.web.ui import STATIC_DIR
 from serendipity_spend.web.ui import router as ui_router
 
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(RequestContextMiddleware)
     app.include_router(api_router)
     app.include_router(ui_router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

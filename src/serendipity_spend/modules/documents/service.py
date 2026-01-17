@@ -8,10 +8,13 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from serendipity_spend.core.logging import get_logger, log_event
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.documents.models import SourceFile, SourceFileStatus
 from serendipity_spend.modules.identity.models import User, UserRole
+
+logger = get_logger(__name__)
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -44,8 +47,17 @@ def create_source_file(
     stored = get_storage().put(key=key, body=body)
 
     if claim.status == ClaimStatus.DRAFT:
+        prev_status = claim.status
         claim.status = ClaimStatus.PROCESSING
         session.add(claim)
+        log_event(
+            logger,
+            "claim.status.changed",
+            claim_id=str(claim.id),
+            from_status=prev_status.value,
+            to_status=claim.status.value,
+            reason="source_file_upload",
+        )
 
     source = SourceFile(
         claim_id=claim.id,
@@ -60,6 +72,17 @@ def create_source_file(
     session.add(source)
     session.commit()
     session.refresh(source)
+    log_event(
+        logger,
+        "source_file.created",
+        claim_id=str(claim.id),
+        source_file_id=str(source.id),
+        storage_key=source.storage_key,
+        filename=source.filename,
+        content_type=source.content_type,
+        byte_size=source.byte_size,
+        sha256=source.sha256,
+    )
     return source
 
 
