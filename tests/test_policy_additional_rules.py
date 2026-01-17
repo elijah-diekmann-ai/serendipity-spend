@@ -20,6 +20,24 @@ def test_extract_total_amount_rejects_non_iso_currency_codes():
     assert _extract_total_amount("Example\nGrand Total GMT 650.00\n") is None
 
 
+def test_extract_total_amount_parses_locale_amount_formats():
+    from serendipity_spend.modules.extraction.service import _extract_total_amount
+
+    assert _extract_total_amount("Example\nTotal EUR 1.234,56\n") == ("EUR", Decimal("1234.56"))
+    assert _extract_total_amount("Example\nTotal EUR 1\u202f234,56\n") == (
+        "EUR",
+        Decimal("1234.56"),
+    )
+    assert _extract_total_amount("Example\nTotal EUR 1 234,56\n") == ("EUR", Decimal("1234.56"))
+    assert _extract_total_amount("Example\nTotal EUR 1'234.56\n") == ("EUR", Decimal("1234.56"))
+
+
+def test_extract_total_amount_treats_dollar_symbol_as_ambiguous():
+    from serendipity_spend.modules.extraction.service import _extract_total_amount
+
+    assert _extract_total_amount("Example\nTotal $ 10.00\n") == ("XXX", Decimal("10.00"))
+
+
 def test_parse_generic_receipt_extracts_total_and_date():
     from serendipity_spend.modules.extraction.service import _parse_generic_receipt
 

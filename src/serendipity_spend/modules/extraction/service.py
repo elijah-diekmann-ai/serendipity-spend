@@ -11,6 +11,7 @@ from io import BytesIO
 
 from pypdf import PdfReader
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.currencies import normalize_currency
@@ -665,19 +666,32 @@ def _segment_pdf_pages(pages: list[str]) -> list[Segment]:
 
 
 def _is_grab_start(text: str) -> bool:
-    return "Your Grab E-Receipt" in text and "Booking ID:" in text
+    t = text.replace("\u202f", " ").replace("\xa0", " ")
+    return bool(
+        re.search(r"(?i)\byour\s+grab\s+e\s*[-]?\s*receipt\b", t)
+        and re.search(r"(?i)\bbooking\s*id\b", t)
+    )
 
 
 def _is_united_start(text: str) -> bool:
-    return "Thanks for your purchase with United" in text
+    t = text.replace("\u202f", " ").replace("\xa0", " ")
+    return bool(
+        re.search(r"(?i)\bthanks\s+for\s+your\s+purchase\b", t)
+        and re.search(r"(?i)\bunited\b", t)
+    )
 
 
 def _is_uber_start(text: str) -> bool:
-    return "trip with Uber" in text and "Total" in text
+    t = text.replace("\u202f", " ").replace("\xa0", " ")
+    return bool(
+        re.search(r"(?i)\btrip\s+with\s+u\s*b\s*e\s*r\b", t)
+        and re.search(r"(?i)\btota[li]\b", t)
+    )
 
 
 def _is_baggage_fee(text: str) -> bool:
-    return "PAYMENT RECEIPT" in text and "BAG FEE" in text
+    t = text.replace("\u202f", " ").replace("\xa0", " ")
+    return bool(re.search(r"(?i)\bpayment\s+receipt\b", t) and re.search(r"(?i)\bbag\s*fee\b", t))
 
 
 def _classify_text(text: str) -> tuple[str, str, float]:
@@ -786,8 +800,19 @@ def _upsert_item_and_link_evidence(
             metadata_json=parsed.metadata,
             dedupe_key=dedupe_key,
         )
-        session.add(item)
-        session.flush()
+        try:
+            with session.begin_nested():
+                session.add(item)
+                session.flush()
+        except IntegrityError:
+            item = session.scalar(
+                select(ExpenseItem).where(
+                    ExpenseItem.claim_id == claim.id,
+                    ExpenseItem.dedupe_key == dedupe_key,
+                )
+            )
+            if not item:
+                raise
 
     existing_link = session.scalar(
         select(ExpenseItemEvidence).where(
@@ -1121,12 +1146,9 @@ def _process_page_ranges(
 
 
 def _should_try_receipt_ai(*, vendor: str, confidence: float) -> bool:
-    if vendor == "Unknown":
-        return True
-    try:
-        return float(confidence) < 0.7
-    except Exception:
-        return True
+    # Deterministic vendor-specific parsing can fail even when the classifier is confident.
+    # When we have no parsed item, AI is a fallback regardless of vendor/confidence.
+    return True
 
 
 def _get_cached_receipt_ai(session, *, text_hash: str) -> dict | None:
@@ -1147,16 +1169,24 @@ def _upsert_receipt_ai_cache(session, *, text_hash: str, response_json: dict) ->
         select(ExtractionAICache).where(ExtractionAICache.text_hash == text_hash)
     )
     if not cached:
-        cached = ExtractionAICache(
+        candidate = ExtractionAICache(
             text_hash=text_hash,
             provider="openai",
             model=str(settings.openai_model or ""),
             schema_version=1,
             response_json=response_json,
         )
-        session.add(cached)
-        session.flush()
-        return
+        try:
+            with session.begin_nested():
+                session.add(candidate)
+                session.flush()
+            return
+        except IntegrityError:
+            cached = session.scalar(
+                select(ExtractionAICache).where(ExtractionAICache.text_hash == text_hash)
+            )
+            if not cached:
+                return
     cached.provider = "openai"
     cached.model = str(settings.openai_model or "")
     cached.schema_version = 1
@@ -1199,8 +1229,10 @@ def _parse_receipt_with_ai(
     if not cur_norm:
         return None
     try:
-        amount = Decimal(str(amt).strip().replace(",", "")).quantize(Decimal("0.01"))
+        amount = _parse_decimal_amount(str(amt))
     except Exception:
+        return None
+    if amount is None:
         return None
 
     evidence_snippet = _snippet_from_line_refs(text, evidence_lines=evidence_lines)
@@ -1743,45 +1775,42 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
     def add_candidates_from_line(ln: str) -> None:
         # Prefer explicit currency codes (optionally with a currency symbol).
         for m in re.finditer(
-            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b",
+            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])\b",
             ln,
         ):
             cur, amt = m.groups()
             cur_norm = normalize_currency(cur)
             if not cur_norm:
                 continue
-            try:
-                candidates.append((cur_norm, Decimal(amt.replace(",", ""))))
-            except Exception:
-                continue
+            amount = _parse_decimal_amount(amt)
+            if amount is not None:
+                candidates.append((cur_norm, amount))
 
         # Symbol-prefixed amounts.
         for m in re.finditer(
-            r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,]*(?:\.[0-9]{2})?)\b", ln
+            r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])\b", ln
         ):
             sym, amt = m.groups()
-            cur = {"$": "USD", "US$": "USD", "CA$": "CAD", "£": "GBP", "€": "EUR"}.get(sym, "USD")
+            cur = {"$": "XXX", "US$": "USD", "CA$": "CAD", "£": "GBP", "€": "EUR"}.get(sym)
             cur_norm = normalize_currency(cur)
             if not cur_norm:
                 continue
-            try:
-                candidates.append((cur_norm, Decimal(amt.replace(",", ""))))
-            except Exception:
-                continue
+            amount = _parse_decimal_amount(amt)
+            if amount is not None:
+                candidates.append((cur_norm, amount))
 
         # Amount followed by currency code.
         for m in re.finditer(
-            r"\b([0-9][0-9,]*(?:\.[0-9]{2})?)\s*([A-Z]{3})\b",
+            r"\b([0-9][0-9,.'\u202f\xa0 ]*[0-9])\s*([A-Z]{3})\b",
             ln,
         ):
             amt, cur = m.groups()
             cur_norm = normalize_currency(cur)
             if not cur_norm:
                 continue
-            try:
-                candidates.append((cur_norm, Decimal(amt.replace(",", ""))))
-            except Exception:
-                continue
+            amount = _parse_decimal_amount(amt)
+            if amount is not None:
+                candidates.append((cur_norm, amount))
 
     for i, ln in enumerate(lines):
         if not keyword_re.search(ln):
@@ -1799,6 +1828,57 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
             return None
     # Use the largest amount found on "total" lines.
     return max(candidates, key=lambda x: x[1])
+
+
+def _parse_decimal_amount(raw: str) -> Decimal | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    s = s.replace("\u202f", " ").replace("\xa0", " ")
+    s = re.sub(r"[^0-9,.' ]", "", s)
+    s = s.replace(" ", "").replace("'", "")
+    if not s or not any(ch.isdigit() for ch in s):
+        return None
+
+    if "," in s and "." in s:
+        decimal_sep = "," if s.rfind(",") > s.rfind(".") else "."
+        thousands_sep = "." if decimal_sep == "," else ","
+        normalized = s.replace(thousands_sep, "").replace(decimal_sep, ".")
+    elif "," in s:
+        if s.count(",") > 1:
+            normalized = s.replace(",", "")
+        else:
+            idx = s.rfind(",")
+            digits_after = len(s) - idx - 1
+            if digits_after == 2:
+                normalized = s.replace(",", ".")
+            elif digits_after == 3 and len(s[:idx]) <= 3:
+                normalized = s.replace(",", "")
+            elif digits_after in {0, 1}:
+                normalized = s.replace(",", ".")
+            else:
+                normalized = s.replace(",", "")
+    elif "." in s:
+        if s.count(".") > 1:
+            normalized = s.replace(".", "")
+        else:
+            idx = s.rfind(".")
+            digits_after = len(s) - idx - 1
+            if digits_after == 2:
+                normalized = s
+            elif digits_after == 3 and len(s[:idx]) <= 3:
+                normalized = s.replace(".", "")
+            elif digits_after in {0, 1}:
+                normalized = s
+            else:
+                normalized = s.replace(".", "")
+    else:
+        normalized = s
+
+    try:
+        return Decimal(normalized).quantize(Decimal("0.01"))
+    except Exception:
+        return None
 
 
 def _snippet_from_line_refs(text: str, *, evidence_lines: list[object]) -> str:
