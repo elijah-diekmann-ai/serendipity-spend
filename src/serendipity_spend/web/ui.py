@@ -17,7 +17,7 @@ from starlette.datastructures import URL
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.currencies import all_currency_codes, normalize_currency
 from serendipity_spend.core.db import db_session
-from serendipity_spend.core.logging import get_logger, log_event, set_user_context
+from serendipity_spend.core.logging import get_logger, get_request_id, log_event, set_user_context
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import ClaimStatus
@@ -850,6 +850,7 @@ async def upload_document_ui(
 
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     batch = uploads or ([upload] if upload is not None else [])
+    request_id = get_request_id()
     for f in batch:
         body = await f.read()
         log_event(
@@ -869,7 +870,7 @@ async def upload_document_ui(
             body=body,
         )
         for source in sources:
-            async_result = extract_source_file_task.delay(str(source.id))
+            async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
             log_event(
                 logger,
                 "celery.task.enqueued",
@@ -1138,7 +1139,8 @@ def create_export_ui(
         return RedirectResponse(url="/login", status_code=303)
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     run = create_export_run(claim_id=claim.id, requested_by_user_id=user.id)
-    async_result = generate_export_task.delay(str(run.id))
+    request_id = get_request_id()
+    async_result = generate_export_task.delay(str(run.id), request_id=request_id)
     log_event(
         logger,
         "celery.task.enqueued",

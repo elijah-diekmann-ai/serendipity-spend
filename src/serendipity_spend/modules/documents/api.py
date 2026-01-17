@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from serendipity_spend.api.deps import get_current_user
 from serendipity_spend.core.db import db_session
-from serendipity_spend.core.logging import get_logger, log_event
+from serendipity_spend.core.logging import get_logger, get_request_id, log_event
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.service import get_claim_for_user
 from serendipity_spend.modules.documents.schemas import SourceFileOut
@@ -33,6 +33,7 @@ async def upload_document(
 ) -> SourceFileOut:
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     body = await upload.read()
+    request_id = get_request_id()
     log_event(
         logger,
         "upload.received",
@@ -49,7 +50,7 @@ async def upload_document(
         content_type=upload.content_type,
         body=body,
     )
-    async_result = extract_source_file_task.delay(str(source.id))
+    async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
     log_event(
         logger,
         "celery.task.enqueued",
@@ -70,6 +71,7 @@ async def upload_documents_batch(
 ) -> list[SourceFileOut]:
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     out: list[SourceFileOut] = []
+    request_id = get_request_id()
     for upload in uploads:
         body = await upload.read()
         log_event(
@@ -89,7 +91,7 @@ async def upload_documents_batch(
             body=body,
         )
         for source in sources:
-            async_result = extract_source_file_task.delay(str(source.id))
+            async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
             log_event(
                 logger,
                 "celery.task.enqueued",

@@ -351,11 +351,13 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
         session.flush()
 
         parser_used = None
-        parsed = _parse_segment(seg=seg, pages=pages)
+        parse_failures: list[str] = []
+        parsed, reason = _parse_segment(seg=seg, pages=pages)
         if parsed:
             parser_used = f"vendor:{seg.vendor}"
         else:
-            parsed = _parse_receipt_with_ai(
+            _append_parse_failure(parse_failures, f"vendor:{seg.vendor}", reason)
+            parsed, reason = _parse_receipt_with_ai(
                 session=session,
                 text=seg_text,
                 text_hash=text_hash,
@@ -363,10 +365,14 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
             )
             if parsed:
                 parser_used = "ai_fallback"
+            else:
+                _append_parse_failure(parse_failures, "ai_fallback", reason)
         if not parsed:
-            parsed = _parse_generic_receipt(seg_text, extraction_method="generic_fallback")
+            parsed, reason = _parse_generic_receipt(seg_text, extraction_method="generic_fallback")
             if parsed:
                 parser_used = "generic_fallback"
+            else:
+                _append_parse_failure(parse_failures, "generic_fallback", reason)
         if not parsed:
             failed_segments.append(seg)
             log_event(
@@ -379,6 +385,9 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
                 receipt_type=seg.receipt_type,
                 page_start=seg.start_page_idx + 1,
                 page_end=seg.end_page_idx + 1,
+                text_hash=text_hash,
+                evidence_snippet=_evidence_snippet(seg_text),
+                parse_failures=parse_failures,
             )
             continue
 
@@ -393,6 +402,9 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
             parser_used=parser_used,
             page_start=seg.start_page_idx + 1,
             page_end=seg.end_page_idx + 1,
+            text_hash=text_hash,
+            evidence_snippet=_evidence_snippet(seg_text),
+            parse_failures=parse_failures,
         )
 
         _upsert_item_and_link_evidence(
@@ -481,12 +493,15 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         receipt_type=receipt_type,
         confidence=confidence,
         text_length=len(text),
+        text_hash=text_hash,
     )
 
     parser_used = None
-    parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    parse_failures: list[str] = []
+    parsed, reason = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
     if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
-        parsed = _parse_receipt_with_ai(
+        _append_parse_failure(parse_failures, "vendor", reason)
+        parsed, reason = _parse_receipt_with_ai(
             session=session,
             text=text,
             text_hash=text_hash,
@@ -494,10 +509,14 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         )
         if parsed:
             parser_used = "ai_image"
+        else:
+            _append_parse_failure(parse_failures, "ai_image", reason)
     if not parsed:
-        parsed = _parse_generic_receipt(text)
+        parsed, reason = _parse_generic_receipt(text)
         if parsed:
             parser_used = "generic"
+        else:
+            _append_parse_failure(parse_failures, "generic", reason)
     if parsed:
         if not parser_used:
             parser_used = "vendor"
@@ -528,6 +547,9 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
             evidence_document_id=str(evidence.id),
             vendor=vendor,
             receipt_type=receipt_type,
+            text_hash=text_hash,
+            evidence_snippet=_evidence_snippet(text),
+            parse_failures=parse_failures,
         )
         _sync_extraction_task(
             session=session,
@@ -552,6 +574,9 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         vendor=parsed.vendor,
         receipt_type=parsed.receipt_type,
         parser_used=parser_used,
+        text_hash=text_hash,
+        evidence_snippet=_evidence_snippet(text),
+        parse_failures=parse_failures,
     )
     _upsert_item_and_link_evidence(
         session=session,
@@ -597,12 +622,15 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         receipt_type=receipt_type,
         confidence=confidence,
         text_length=len(text),
+        text_hash=text_hash,
     )
 
     parser_used = None
-    parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
+    parse_failures: list[str] = []
+    parsed, reason = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=text)
     if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
-        parsed = _parse_receipt_with_ai(
+        _append_parse_failure(parse_failures, "vendor", reason)
+        parsed, reason = _parse_receipt_with_ai(
             session=session,
             text=text,
             text_hash=text_hash,
@@ -610,10 +638,14 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         )
         if parsed:
             parser_used = "ai_text"
+        else:
+            _append_parse_failure(parse_failures, "ai_text", reason)
     if not parsed:
-        parsed = _parse_generic_receipt(text, extraction_method="generic")
+        parsed, reason = _parse_generic_receipt(text, extraction_method="generic")
         if parsed:
             parser_used = "generic"
+        else:
+            _append_parse_failure(parse_failures, "generic", reason)
 
     if parsed and vendor == "Unknown":
         vendor = parsed.vendor
@@ -644,6 +676,9 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
             evidence_document_id=str(evidence.id),
             vendor=vendor,
             receipt_type=receipt_type,
+            text_hash=text_hash,
+            evidence_snippet=_evidence_snippet(text),
+            parse_failures=parse_failures,
         )
         _sync_extraction_task(
             session=session,
@@ -665,6 +700,9 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         vendor=parsed.vendor,
         receipt_type=parsed.receipt_type,
         parser_used=parser_used,
+        text_hash=text_hash,
+        evidence_snippet=_evidence_snippet(text),
+        parse_failures=parse_failures,
     )
     _upsert_item_and_link_evidence(
         session=session,
@@ -938,26 +976,114 @@ def _classify_text(text: str) -> tuple[str, str, float]:
     return "Unknown", "unknown", 0.1
 
 
-def _parse_segment(*, seg: Segment, pages: list[str]):
+def _append_parse_failure(failures: list[str], parser_name: str, reason: str | None) -> None:
+    if reason:
+        failures.append(f"{parser_name}:{reason}")
+    else:
+        failures.append(f"{parser_name}:unknown")
+
+
+def _evidence_snippet(text: str, max_len: int = 200) -> str | None:
+    snippet = re.sub(r"\s+", " ", text).strip()
+    if not snippet:
+        return None
+    if len(snippet) > max_len:
+        return snippet[:max_len] + "..."
+    return snippet
+
+
+def _metadata_subset(metadata: dict) -> dict:
+    keys = (
+        "hotel_nights",
+        "flight_duration_hours",
+        "flight_cabin_class",
+        "attendees",
+        "extraction_family",
+        "extraction_method",
+    )
+    return {key: metadata.get(key) for key in keys if key in metadata}
+
+
+def _parse_grab_with_reason(page_1: str, page_2: str):
+    parsed = parse_grab_ride_receipt(page_1, page_2)
+    if parsed:
+        return parsed, None
+    if "Your Grab E-Receipt" not in page_1 or "Booking ID:" not in page_1:
+        return None, "missing_header"
+    if not re.search(r"Booking ID:\s*([A-Z0-9-]+)", page_1, re.I):
+        return None, "missing_booking_id"
+    if not re.search(r"Total Paid\s*[A-Z]{3}\s*[0-9]+\.[0-9]{2}", page_1, re.I):
+        return None, "missing_total"
+    return None, "grab_parse_failed"
+
+
+def _parse_united_with_reason(text: str):
+    parsed = parse_united_wifi_receipt(text)
+    if parsed:
+        return parsed, None
+    if "Thanks for your purchase with United" not in text:
+        return None, "missing_header"
+    if not re.search(r"Total:\s*([0-9]+\.[0-9]{2})\s*([A-Z]{3})", text, re.I):
+        return None, "missing_total"
+    return None, "united_parse_failed"
+
+
+def _parse_uber_with_reason(summary_page: str, detail_page: str):
+    parsed = parse_uber_trip_summary(summary_page, detail_page)
+    if parsed:
+        return parsed, None
+    if not re.search(r"(?i)\btrip\s+with\s+u\s*b\s*e\s*r\b", summary_page):
+        return None, "missing_trip_header"
+    if not re.search(r"(?i)\btota[li]\b", summary_page):
+        return None, "missing_total_label"
+    m = re.search(
+        r"(?i)\btotal\b\s*[:\-]?\s*(CA\$|US\$|\$)\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])",
+        summary_page,
+    )
+    if not m:
+        return None, "missing_total_amount"
+    if _parse_decimal_amount(m.group(2)) is None:
+        return None, "amount_parse_failed"
+    return None, "uber_parse_failed"
+
+
+def _parse_baggage_fee_with_reason(text: str):
+    parsed = parse_baggage_fee_payment_receipt(text)
+    if parsed:
+        return parsed, None
+    if "PAYMENT RECEIPT" not in text or "BAG FEE" not in text:
+        return None, "missing_header"
+    if not re.search(r"AMEX\s+X+[0-9]{4}.*?CAD\s*\$[0-9]+\.[0-9]{2}", text, re.I):
+        return None, "missing_total"
+    return None, "baggage_fee_parse_failed"
+
+
+def _parse_segment(*, seg: Segment, pages: list[str]) -> tuple[object | None, str | None]:
     if seg.vendor == "Grab":
-        return parse_grab_ride_receipt(pages[seg.start_page_idx], pages[seg.start_page_idx + 1])
+        return _parse_grab_with_reason(
+            pages[seg.start_page_idx],
+            pages[seg.start_page_idx + 1],
+        )
     if seg.vendor == "United Airlines":
-        return parse_united_wifi_receipt(
+        return _parse_united_with_reason(
             "\n\n".join(pages[seg.start_page_idx : seg.end_page_idx + 1])
         )
     if seg.vendor == "Uber":
-        return parse_uber_trip_summary(pages[seg.start_page_idx], pages[seg.start_page_idx + 1])
+        return _parse_uber_with_reason(
+            pages[seg.start_page_idx],
+            pages[seg.start_page_idx + 1],
+        )
     if seg.vendor == "Airline":
-        return parse_baggage_fee_payment_receipt(pages[seg.start_page_idx])
-    return None
+        return _parse_baggage_fee_with_reason(pages[seg.start_page_idx])
+    return None, "unsupported_segment"
 
 
-def _parse_single_text(*, vendor: str, receipt_type: str, text: str):
+def _parse_single_text(*, vendor: str, receipt_type: str, text: str) -> tuple[object | None, str | None]:
     if vendor == "United Airlines":
-        return parse_united_wifi_receipt(text)
+        return _parse_united_with_reason(text)
     if vendor == "Airline" and receipt_type == "payment_receipt":
-        return parse_baggage_fee_payment_receipt(text)
-    return None
+        return _parse_baggage_fee_with_reason(text)
+    return None, "unsupported_vendor"
 
 
 def _dedupe_key(vendor: str, vendor_reference: str | None, text_hash: str) -> str:
@@ -1068,6 +1194,16 @@ def _upsert_item_and_link_evidence(
         dedupe_key=dedupe_key,
         vendor=parsed.vendor,
         vendor_reference=parsed.vendor_reference,
+        receipt_type=item.receipt_type,
+        category=item.category,
+        description=item.description,
+        transaction_date=item.transaction_date,
+        amount_original_amount=item.amount_original_amount,
+        amount_original_currency=item.amount_original_currency,
+        amount_home_amount=item.amount_home_amount,
+        amount_home_currency=item.amount_home_currency,
+        fx_rate_to_home=item.fx_rate_to_home,
+        metadata_subset=_metadata_subset(item.metadata_json or parsed.metadata or {}),
         action=action,
     )
     return item
@@ -1186,6 +1322,7 @@ def _process_page_ranges(
 ) -> tuple[int, list[int]]:
     parsed_items = 0
     unhandled_page_idxs: list[int] = []
+    page_attempts: dict[int, dict[str, object]] = {}
 
     for start, end in _group_consecutive_page_idxs(page_idxs):
         if start == end:
@@ -1195,9 +1332,15 @@ def _process_page_ranges(
                 page_text.encode("utf-8", errors="ignore")
             ).hexdigest()
             parser_used = None
-            parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
+            parse_failures: list[str] = []
+            parsed, reason = _parse_single_text(
+                vendor=vendor,
+                receipt_type=receipt_type,
+                text=page_text,
+            )
             if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
-                parsed = _parse_receipt_with_ai(
+                _append_parse_failure(parse_failures, "vendor", reason)
+                parsed, reason = _parse_receipt_with_ai(
                     session=session,
                     text=page_text,
                     text_hash=page_text_hash,
@@ -1205,10 +1348,17 @@ def _process_page_ranges(
                 )
                 if parsed:
                     parser_used = "ai_page"
+                else:
+                    _append_parse_failure(parse_failures, "ai_page", reason)
             if not parsed:
-                parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
+                parsed, reason = _parse_generic_receipt(
+                    page_text,
+                    extraction_method="generic_page",
+                )
                 if parsed:
                     parser_used = "generic_page"
+                else:
+                    _append_parse_failure(parse_failures, "generic_page", reason)
 
             if parsed:
                 if not parser_used:
@@ -1243,6 +1393,9 @@ def _process_page_ranges(
                     vendor=parsed.vendor,
                     receipt_type=parsed.receipt_type,
                     parser_used=parser_used,
+                    text_hash=text_hash,
+                    evidence_snippet=_evidence_snippet(page_text),
+                    parse_failures=parse_failures,
                 )
                 _upsert_item_and_link_evidence(
                     session=session,
@@ -1261,11 +1414,16 @@ def _process_page_ranges(
                     evidence_document_id=str(evidence.id),
                     page_start=start + 1,
                     page_end=start + 1,
+                    text_hash=text_hash,
+                    evidence_snippet=_evidence_snippet(page_text),
+                    parse_failures=parse_failures,
                 )
                 unhandled_page_idxs.append(start)
             continue
 
-        per_page_parsed: list[tuple[int, object, str, str, float, str]] = []
+        per_page_parsed: list[
+            tuple[int, object, str, str, float, str, list[str], str | None]
+        ] = []
         for idx in range(start, end + 1):
             page_text = pages[idx]
             vendor, receipt_type, confidence = _classify_text(page_text)
@@ -1273,9 +1431,15 @@ def _process_page_ranges(
                 page_text.encode("utf-8", errors="ignore")
             ).hexdigest()
             parser_used = None
-            parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=page_text)
+            parse_failures: list[str] = []
+            parsed, reason = _parse_single_text(
+                vendor=vendor,
+                receipt_type=receipt_type,
+                text=page_text,
+            )
             if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
-                parsed = _parse_receipt_with_ai(
+                _append_parse_failure(parse_failures, "vendor", reason)
+                parsed, reason = _parse_receipt_with_ai(
                     session=session,
                     text=page_text,
                     text_hash=page_text_hash,
@@ -1283,10 +1447,22 @@ def _process_page_ranges(
                 )
                 if parsed:
                     parser_used = "ai_page"
+                else:
+                    _append_parse_failure(parse_failures, "ai_page", reason)
             if not parsed:
-                parsed = _parse_generic_receipt(page_text, extraction_method="generic_page")
+                parsed, reason = _parse_generic_receipt(
+                    page_text,
+                    extraction_method="generic_page",
+                )
                 if parsed:
                     parser_used = "generic_page"
+                else:
+                    _append_parse_failure(parse_failures, "generic_page", reason)
+            page_attempts[idx] = {
+                "text_hash": page_text_hash,
+                "snippet": _evidence_snippet(page_text),
+                "parse_failures": parse_failures,
+            }
             if not parsed:
                 continue
             if vendor == "Unknown":
@@ -1296,11 +1472,31 @@ def _process_page_ranges(
             confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
             if not parser_used:
                 parser_used = "vendor"
-            per_page_parsed.append((idx, parsed, vendor, receipt_type, confidence, parser_used))
+            per_page_parsed.append(
+                (
+                    idx,
+                    parsed,
+                    vendor,
+                    receipt_type,
+                    confidence,
+                    parser_used,
+                    parse_failures,
+                    _evidence_snippet(page_text),
+                )
+            )
 
         if len(per_page_parsed) >= 2:
             parsed_by_idx = {idx for idx, *_ in per_page_parsed}
-            for idx, parsed, vendor, receipt_type, confidence, parser_used in per_page_parsed:
+            for (
+                idx,
+                parsed,
+                vendor,
+                receipt_type,
+                confidence,
+                parser_used,
+                parse_failures,
+                page_snippet,
+            ) in per_page_parsed:
                 page_text = pages[idx]
                 evidence, text_hash = _add_evidence_document(
                     session=session,
@@ -1323,6 +1519,9 @@ def _process_page_ranges(
                     vendor=parsed.vendor,
                     receipt_type=parsed.receipt_type,
                     parser_used=parser_used,
+                    text_hash=text_hash,
+                    evidence_snippet=page_snippet,
+                    parse_failures=parse_failures,
                 )
                 _upsert_item_and_link_evidence(
                     session=session,
@@ -1347,6 +1546,7 @@ def _process_page_ranges(
                     extracted_text=page_text,
                     confidence=0.0,
                 )
+                attempt = page_attempts.get(idx, {})
                 log_event(
                     logger,
                     "extraction.page.unparsed",
@@ -1354,6 +1554,9 @@ def _process_page_ranges(
                     claim_id=str(claim.id),
                     page_start=idx + 1,
                     page_end=idx + 1,
+                    text_hash=attempt.get("text_hash"),
+                    evidence_snippet=attempt.get("snippet"),
+                    parse_failures=attempt.get("parse_failures"),
                 )
                 unhandled_page_idxs.append(idx)
             continue
@@ -1364,9 +1567,15 @@ def _process_page_ranges(
             combined_text.encode("utf-8", errors="ignore")
         ).hexdigest()
         parser_used = None
-        parsed = _parse_single_text(vendor=vendor, receipt_type=receipt_type, text=combined_text)
+        parse_failures: list[str] = []
+        parsed, reason = _parse_single_text(
+            vendor=vendor,
+            receipt_type=receipt_type,
+            text=combined_text,
+        )
         if not parsed and _should_try_receipt_ai(vendor=vendor, confidence=confidence):
-            parsed = _parse_receipt_with_ai(
+            _append_parse_failure(parse_failures, "vendor", reason)
+            parsed, reason = _parse_receipt_with_ai(
                 session=session,
                 text=combined_text,
                 text_hash=combined_text_hash,
@@ -1374,10 +1583,17 @@ def _process_page_ranges(
             )
             if parsed:
                 parser_used = "ai_multi_page"
+            else:
+                _append_parse_failure(parse_failures, "ai_multi_page", reason)
         if not parsed:
-            parsed = _parse_generic_receipt(combined_text, extraction_method="generic_multi_page")
+            parsed, reason = _parse_generic_receipt(
+                combined_text,
+                extraction_method="generic_multi_page",
+            )
             if parsed:
                 parser_used = "generic_multi_page"
+            else:
+                _append_parse_failure(parse_failures, "generic_multi_page", reason)
 
         if parsed:
             if not parser_used:
@@ -1408,6 +1624,9 @@ def _process_page_ranges(
                 vendor=parsed.vendor,
                 receipt_type=parsed.receipt_type,
                 parser_used=parser_used,
+                text_hash=text_hash,
+                evidence_snippet=_evidence_snippet(combined_text),
+                parse_failures=parse_failures,
             )
             _upsert_item_and_link_evidence(
                 session=session,
@@ -1420,7 +1639,16 @@ def _process_page_ranges(
             continue
 
         if per_page_parsed:
-            idx, parsed, vendor, receipt_type, confidence, parser_used = per_page_parsed[0]
+            (
+                idx,
+                parsed,
+                vendor,
+                receipt_type,
+                confidence,
+                parser_used,
+                parse_failures,
+                page_snippet,
+            ) = per_page_parsed[0]
             page_text = pages[idx]
             evidence, text_hash = _add_evidence_document(
                 session=session,
@@ -1443,6 +1671,9 @@ def _process_page_ranges(
                 vendor=parsed.vendor,
                 receipt_type=parsed.receipt_type,
                 parser_used=parser_used,
+                text_hash=text_hash,
+                evidence_snippet=page_snippet,
+                parse_failures=parse_failures,
             )
             _upsert_item_and_link_evidence(
                 session=session,
@@ -1466,6 +1697,7 @@ def _process_page_ranges(
                     extracted_text=other_text,
                     confidence=0.0,
                 )
+                attempt = page_attempts.get(other_idx, {})
                 log_event(
                     logger,
                     "extraction.page.unparsed",
@@ -1473,6 +1705,9 @@ def _process_page_ranges(
                     claim_id=str(claim.id),
                     page_start=other_idx + 1,
                     page_end=other_idx + 1,
+                    text_hash=attempt.get("text_hash"),
+                    evidence_snippet=attempt.get("snippet"),
+                    parse_failures=attempt.get("parse_failures"),
                 )
                 unhandled_page_idxs.append(other_idx)
             continue
@@ -1489,6 +1724,7 @@ def _process_page_ranges(
                 extracted_text=page_text,
                 confidence=0.0,
             )
+            attempt = page_attempts.get(idx, {})
             log_event(
                 logger,
                 "extraction.page.unparsed",
@@ -1496,6 +1732,9 @@ def _process_page_ranges(
                 claim_id=str(claim.id),
                 page_start=idx + 1,
                 page_end=idx + 1,
+                text_hash=attempt.get("text_hash"),
+                evidence_snippet=attempt.get("snippet"),
+                parse_failures=attempt.get("parse_failures"),
             )
             unhandled_page_idxs.append(idx)
 
@@ -1560,7 +1799,7 @@ def _parse_receipt_with_ai(
     extraction_method: str,
 ):
     if not receipt_ai_available():
-        return None
+        return None, "ai_unavailable"
     ai = _get_cached_receipt_ai(session, text_hash=text_hash)
     if ai is None:
         ai = extract_receipt_fields(text)
@@ -1568,34 +1807,34 @@ def _parse_receipt_with_ai(
             _upsert_receipt_ai_cache(session, text_hash=text_hash, response_json=ai)
 
     if not ai:
-        return None
+        return None, "ai_no_response"
 
     total = ai.get("total") if isinstance(ai, dict) else None
     if not isinstance(total, dict):
-        return None
+        return None, "ai_missing_total"
 
     cur = total.get("currency")
     amt = total.get("amount")
     evidence_lines = total.get("evidence_lines")
     if not isinstance(evidence_lines, list) or not evidence_lines:
-        return None
+        return None, "ai_missing_total_evidence"
 
     if not isinstance(cur, str) or not isinstance(amt, str):
-        return None
+        return None, "ai_invalid_currency_or_amount"
     cur_norm = normalize_currency(cur)
     if not cur_norm:
-        return None
+        return None, "ai_invalid_currency"
     try:
         amount = _parse_decimal_amount(str(amt))
     except Exception:
-        return None
+        return None, "ai_invalid_amount"
     if amount is None:
-        return None
+        return None, "ai_invalid_amount"
 
     evidence_snippet = _snippet_from_line_refs(text, evidence_lines=evidence_lines)
     corroborated = _extract_total_amount(evidence_snippet)
     if not corroborated or corroborated[0] != cur_norm or corroborated[1] != amount:
-        return None
+        return None, "ai_total_not_correlated"
 
     tx_date = None
     tx_date_from_ai = False
@@ -1658,23 +1897,26 @@ def _parse_receipt_with_ai(
         category = inferred_category
     metadata.update(policy_metadata)
 
-    return _GenericParsedExpense(
-        vendor=vendor,
-        vendor_reference=None,
-        receipt_type="generic_receipt",
-        category=category,
-        description=f"Receipt: {vendor}" if vendor else "Receipt",
-        transaction_date=tx_date,
-        amount=amount,
-        currency=cur_norm,
-        metadata=metadata,
+    return (
+        _GenericParsedExpense(
+            vendor=vendor,
+            vendor_reference=None,
+            receipt_type="generic_receipt",
+            category=category,
+            description=f"Receipt: {vendor}" if vendor else "Receipt",
+            transaction_date=tx_date,
+            amount=amount,
+            currency=cur_norm,
+            metadata=metadata,
+        ),
+        None,
     )
 
 
 def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
     total = _extract_total_amount(text)
     if not total:
-        return None
+        return None, "generic_missing_total"
     currency, amount = total
     tx_date = _extract_any_date(text)
     vendor = _extract_vendor_name(text) or "Unknown"
@@ -1692,16 +1934,19 @@ def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
         category = inferred_category
     metadata.update(policy_metadata)
 
-    return _GenericParsedExpense(
-        vendor=vendor,
-        vendor_reference=None,
-        receipt_type="generic_receipt",
-        category=category,
-        description=f"Receipt: {vendor}" if vendor else "Receipt",
-        transaction_date=tx_date,
-        amount=amount,
-        currency=currency,
-        metadata=metadata,
+    return (
+        _GenericParsedExpense(
+            vendor=vendor,
+            vendor_reference=None,
+            receipt_type="generic_receipt",
+            category=category,
+            description=f"Receipt: {vendor}" if vendor else "Receipt",
+            transaction_date=tx_date,
+            amount=amount,
+            currency=currency,
+            metadata=metadata,
+        ),
+        None,
     )
 
 
