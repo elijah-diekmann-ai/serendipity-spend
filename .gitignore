@@ -12,5 +12,5 @@ __pycache__/
 
 # Local access notes (do not deploy)
 access.md
-access.MD
-email.md
+prompt.md
+receipts.md
