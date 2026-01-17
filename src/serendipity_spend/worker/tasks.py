@@ -12,7 +12,9 @@ from serendipity_spend.core.logging import (
     log_event,
     log_exception,
     monotonic_ms,
+    reset_request_context,
     reset_task_context,
+    set_request_context,
     set_task_context,
 )
 from serendipity_spend.worker.celery_app import celery_app
@@ -21,10 +23,11 @@ logger = get_logger(__name__)
 
 
 @celery_app.task(name="extract_source_file", bind=True)
-def extract_source_file_task(self, source_file_id: str) -> None:
+def extract_source_file_task(self, source_file_id: str, request_id: str | None = None) -> None:
     from serendipity_spend.modules.extraction.service import extract_source_file
 
     task_id = getattr(self.request, "id", None)
+    request_tokens = set_request_context(request_id=request_id)
     token = set_task_context(task_id)
     start = time.monotonic()
     log_event(
@@ -56,13 +59,15 @@ def extract_source_file_task(self, source_file_id: str) -> None:
         raise
     finally:
         reset_task_context(token)
+        reset_request_context(request_tokens)
 
 
 @celery_app.task(name="generate_export", bind=True)
-def generate_export_task(self, export_run_id: str) -> None:
+def generate_export_task(self, export_run_id: str, request_id: str | None = None) -> None:
     from serendipity_spend.modules.exports.service import generate_export
 
     task_id = getattr(self.request, "id", None)
+    request_tokens = set_request_context(request_id=request_id)
     token = set_task_context(task_id)
     start = time.monotonic()
     log_event(
@@ -94,3 +99,4 @@ def generate_export_task(self, export_run_id: str) -> None:
         raise
     finally:
         reset_task_context(token)
+        reset_request_context(request_tokens)

@@ -88,6 +88,10 @@ def set_user_context(user_id: str | None) -> None:
     _user_id_var.set(user_id)
 
 
+def get_request_id() -> str | None:
+    return _request_id_var.get()
+
+
 def set_task_context(task_id: str | None) -> contextvars.Token:
     return _task_id_var.set(task_id)
 
