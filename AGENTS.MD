@@ -7,23 +7,26 @@ repo:
   language: python
   python_requires: ">=3.12"
 
+agent_instructions:
+  - do not use `git revert`
+  - do not modify external changes you did not make unless explicitly instructed
+
+lookup_instructions:
+  - find “DC_OOP_05 Sep 2025” in problem_statement_verbatim within this file
+  - the PDF is in the Data/ directory: Data/DC__OOP__05 Sep 2025.pdf
+  - extract text from the PDF if you need to view the contents
+
 problem_statement_verbatim: |-
   Currently, employees who wish to claim travel expenses send invoices and receipts directly to me (for example, hotel confirmation emails, Uber receipts, etc.; see the attached email titled “Expenses” as an example). I then manually review these items and prepare a summary table in Excel (see “Travel Reimbursement_DC_Jan 2026”). As part of this process, I check each item for compliance with the Travel Policy, such as ensuring hotel rates do not exceed USD 300 per night and that flights under six hours are booked in economy class.
 
-   
-
   This process is entirely manual, time-consuming, and prone to errors, including incorrect amounts and potential duplication. The attachment “DC_OOP_05 Sep 2025” reflects the current output used to support reimbursement claims, where the Excel file is the summary and the PDF contains the supporting documents.
-
-   
 
   Ideally, the process would be streamlined as follows:
 
-   
-
-  Employees upload all relevant supporting documents to a portal, which automatically generates a claim summary.
-  Automated checks are performed against the Travel Policy, with any inconsistencies clearly flagged at the summary level.
-  Employees review the generated summary to confirm accuracy and completeness, fill in any missing information (for example, trip purpose, or names of attendees for food and beverage expenses over USD 100), and address any flagged items.
-  The summary and supporting documents are then routed to me for review and approval prior to payment.
+  1. Employees upload all relevant supporting documents to a portal, which automatically generates a claim summary.
+  2. Automated checks are performed against the Travel Policy, with any inconsistencies clearly flagged at the summary level.
+  3. Employees review the generated summary to confirm accuracy and completeness, fill in any missing information (for example, trip purpose, or names of attendees for food and beverage expenses over USD 100), and address any flagged items.
+  4. The summary and supporting documents are then routed to me for review and approval prior to payment.
 
 docs_and_files:
   product_docs:
