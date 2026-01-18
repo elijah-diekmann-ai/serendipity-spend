@@ -1,0 +1,212 @@
+<div id="policy-section" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+  {% if has_receipt_issues %}
+    <details class="step-card" id="policy" open>
+      <summary class="step-header">
+        <span class="step-number">4</span>
+        <span class="step-title">Policy checks</span>
+        <span class="pill warn" style="margin-left: auto;">{{ receipt_violations|length }} to review</span>
+      </summary>
+      <div class="step-body">
+        {% if receipt_claim_violations|length > 0 %}
+          <div class="policy-subtitle">Claim-level</div>
+          <div class="policy-issues">
+            {% for v in receipt_claim_violations %}
+              {% set exc = policy_exceptions_by_key.get(v.dedupe_key) %}
+              <div class="policy-issue">
+                <div class="policy-issue-top">
+                  <div class="policy-issue-badges">
+                    {% if v.severity.value == 'FAIL' %}
+                      <span class="pill bad">FAIL</span>
+                    {% elif v.severity.value == 'WARN' %}
+                      <span class="pill warn">WARN</span>
+                    {% elif v.severity.value == 'NEEDS_INFO' %}
+                      <span class="pill info">NEEDS INFO</span>
+                    {% else %}
+                      <span class="pill">{{ v.severity.value.replace('_',' ') }}</span>
+                    {% endif %}
+                    {% if v.severity.value != 'FAIL' and (v.data_json or {}).get('submit_blocking') %}
+                      <span class="pill bad">Blocks submit</span>
+                    {% endif %}
+                    <span class="pill">{{ v.rule_id }}</span>
+                    {% if v.rule_id in ['R103','R123'] and exc %}
+                      {% if exc.status.value == 'REQUESTED' %}
+                        <span class="pill warn">Exception requested</span>
+                      {% elif exc.status.value == 'APPROVED' %}
+                        <span class="pill ok">Exception approved</span>
+                      {% elif exc.status.value == 'REJECTED' %}
+                        <span class="pill bad">Exception rejected</span>
+                      {% endif %}
+                    {% endif %}
+                  </div>
+                  <div class="policy-issue-actions">
+                    {% set t = policy_tasks_by_key.get(v.dedupe_key) %}
+                    {% if t and t.status.value == 'OPEN' and (user.role.value == 'ADMIN' or user.id == claim.employee_id) %}
+                      <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="display:inline;">
+                        <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                        <button class="btn btn-xs" type="submit">Mark done</button>
+                      </form>
+                    {% endif %}
+                  </div>
+                </div>
+                <div class="policy-issue-title">{{ v.title }}</div>
+                <div class="muted">{{ v.message }}</div>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% for g in receipt_item_groups %}
+          {% set item = g.item %}
+          {% set item_id = g.item_id %}
+          <div class="policy-subtitle mt-2">Item</div>
+          <div class="policy-issue">
+            <div class="policy-issue-top">
+              <div>
+                <div class="policy-issue-title" style="margin-top:0;">
+                  {% if item %}
+                    {{ item.vendor }} · {{ item.amount_original_currency }} {{ '%.2f'|format(item.amount_original_amount) }}
+                  {% else %}
+                    Item {{ item_id|string|truncate(8, True, '') }}
+                  {% endif %}
+                </div>
+                {% if item %}
+                  <div class="muted mono">
+                    {% if item.transaction_date %}{{ item.transaction_date }} · {% endif %}{{ item.receipt_type }}
+                  </div>
+                {% endif %}
+              </div>
+              <div class="policy-issue-actions">
+                {% if item_id %}
+                  <a
+                    class="btn btn-xs"
+                    href="/app/claims/{{ claim.id }}?edit_item_id={{ item_id }}#edit-item"
+                    hx-get="/app/claims/{{ claim.id }}/items/{{ item_id }}/drawer"
+                    hx-target="#drawer-content"
+                    hx-swap="innerHTML"
+                    data-drawer-open
+                  >Review item</a>
+                {% endif %}
+              </div>
+            </div>
+            <div class="policy-issues" style="margin-top:12px;">
+              {% for v in g.violations %}
+                {% set exc = policy_exceptions_by_key.get(v.dedupe_key) %}
+                <div class="policy-issue">
+                  <div class="policy-issue-top">
+                    <div class="policy-issue-badges">
+                      {% if v.severity.value == 'FAIL' %}
+                        <span class="pill bad">FAIL</span>
+                      {% elif v.severity.value == 'WARN' %}
+                        <span class="pill warn">WARN</span>
+                      {% elif v.severity.value == 'NEEDS_INFO' %}
+                        <span class="pill info">NEEDS INFO</span>
+                      {% else %}
+                        <span class="pill">{{ v.severity.value.replace('_',' ') }}</span>
+                      {% endif %}
+                      {% if v.severity.value != 'FAIL' and (v.data_json or {}).get('submit_blocking') %}
+                        <span class="pill bad">Blocks submit</span>
+                      {% endif %}
+                      <span class="pill">{{ v.rule_id }}</span>
+                      {% if v.rule_id in ['R103','R123'] and exc %}
+                        {% if exc.status.value == 'REQUESTED' %}
+                          <span class="pill warn">Exception requested</span>
+                        {% elif exc.status.value == 'APPROVED' %}
+                          <span class="pill ok">Exception approved</span>
+                        {% elif exc.status.value == 'REJECTED' %}
+                          <span class="pill bad">Exception rejected</span>
+                        {% endif %}
+                      {% endif %}
+                    </div>
+                    <div class="policy-issue-actions">
+                      {% set t = policy_tasks_by_key.get(v.dedupe_key) %}
+                      {% if t and t.status.value == 'OPEN' and (user.role.value == 'ADMIN' or user.id == claim.employee_id) %}
+                        <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="display:inline;">
+                          <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                          <button class="btn btn-xs" type="submit">Mark done</button>
+                        </form>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="policy-issue-title">{{ v.title }}</div>
+                  <div class="muted">{{ v.message }}</div>
+                  {% if v.rule_id in ['R103','R123'] and exc %}
+                    <div class="muted mt-1"><strong>Justification:</strong> {{ exc.justification }}</div>
+                    {% if exc.decision_comment %}
+                      <div class="muted mt-1"><strong>Decision note:</strong> {{ exc.decision_comment }}</div>
+                    {% endif %}
+                  {% endif %}
+                  {% if v.rule_id in ['R103','R123'] and (user.role.value == 'ADMIN' or user.id == claim.employee_id) and claim.status.value not in ['APPROVED','REJECTED','PAID'] %}
+                    {% if not exc or exc.status.value == 'REJECTED' %}
+                      <form method="post" action="/app/claims/{{ claim.id }}/policy/exceptions/request" class="mt-1">
+                        <input type="hidden" name="violation_id" value="{{ v.id }}" />
+                        <div class="form-field">
+                          <label>Justification</label>
+                          <textarea name="justification" rows="2" required placeholder="Why is this exception needed?"></textarea>
+                        </div>
+                        <button class="btn btn-xs" type="submit">{% if exc and exc.status.value == 'REJECTED' %}Resubmit exception{% else %}Request exception{% endif %}</button>
+                      </form>
+                    {% endif %}
+                  {% endif %}
+                  {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' and exc and exc.status.value == 'REQUESTED' %}
+                    <form method="post" action="/app/policy/exceptions/{{ exc.id }}/decide" class="mt-1">
+                      <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                      <div class="form-field">
+                        <label>Comment (optional)</label>
+                        <input name="comment" placeholder="Optional note for audit / employee" />
+                      </div>
+                      <div class="btn-row">
+                        <button class="btn btn-xs btn-primary" type="submit" name="decision" value="APPROVED">Approve exception</button>
+                        <button class="btn btn-xs" type="submit" name="decision" value="REJECTED">Reject exception</button>
+                      </div>
+                    </form>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% endfor %}
+
+        {% if open_other_tasks|length > 0 %}
+          <div class="policy-subtitle mt-2">Other tasks</div>
+          <div class="task-list">
+            {% for t in open_other_tasks %}
+              <div class="task-item">
+                <div>
+                  <div>{{ t.title }}</div>
+                  {% if t.description %}<div class="muted" style="font-size:12px;">{{ t.description }}</div>{% endif %}
+                </div>
+                {% if user.role.value == 'ADMIN' or user.id == claim.employee_id %}
+                  <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="margin:0;">
+                    <input type="hidden" name="claim_id" value="{{ claim.id }}" />
+                    <button class="btn btn-xs" type="submit">Mark done</button>
+                  </form>
+                {% endif %}
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% if policy_summary.resolved|length > 0 %}
+          <details class="mt-2">
+            <summary class="muted">Resolved policy issues ({{ policy_summary.resolved|length }})</summary>
+            <div class="policy-issues mt-1">
+              {% for v in policy_summary.resolved %}
+                <div class="policy-issue policy-issue--resolved">
+                  <div class="policy-issue-top">
+                    <div class="policy-issue-badges">
+                      <span class="pill ok">RESOLVED</span>
+                      <span class="pill">{{ v.rule_id }}</span>
+                    </div>
+                  </div>
+                  <div class="policy-issue-title">{{ v.title }}</div>
+                  <div class="muted">{{ v.message }}</div>
+                </div>
+              {% endfor %}
+            </div>
+          </details>
+        {% endif %}
+      </div>
+    </details>
+  {% endif %}
+</div>
+

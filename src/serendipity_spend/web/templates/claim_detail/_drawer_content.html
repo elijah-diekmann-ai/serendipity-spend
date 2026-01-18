@@ -1,0 +1,142 @@
+<div class="drawer-header">
+  <div>
+    <div style="font-weight:600; color:var(--text-primary);">Review expense</div>
+    <div class="muted mono" style="font-size:12px;">
+      {{ item.vendor }} · {{ item.amount_original_currency }} {{ '%.2f'|format(item.amount_original_amount) }}
+      {% if item.transaction_date %} · {{ item.transaction_date }}{% endif %}
+    </div>
+  </div>
+  <button class="btn btn-sm" type="button" data-drawer-close>Close</button>
+</div>
+
+{% if saved %}
+  <div class="callout success mt-1">Saved.</div>
+{% endif %}
+{% if error %}
+  <div class="callout error mt-1">{{ error }}</div>
+{% endif %}
+
+<form
+  method="post"
+  action="/app/claims/{{ claim.id }}/items/{{ item.id }}/update"
+  class="compact-form mt-2"
+  hx-post="/app/claims/{{ claim.id }}/items/{{ item.id }}/update"
+  hx-target="#drawer-content"
+  hx-swap="innerHTML"
+>
+  <div class="form-grid-4">
+    <div class="form-field"><label>Vendor</label><input name="vendor" value="{{ item.vendor }}" required /></div>
+    <div class="form-field"><label>Date</label><input type="date" name="transaction_date" value="{{ item.transaction_date or '' }}" /></div>
+    <div class="form-field"><label>Amount</label><input name="amount_original_amount" value="{{ '%.2f'|format(item.amount_original_amount) }}" required /></div>
+    <div class="form-field">
+      <label>Currency</label>
+      <select name="amount_original_currency" required>
+        {% for cur in currency_options %}<option value="{{ cur }}" {% if cur == item.amount_original_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="form-grid-2">
+    <div class="form-field">
+      <label>Category</label>
+      <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}" {% if item.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+    </div>
+    <div class="form-field"><label>Description</label><input name="description" value="{{ item.description or '' }}" /></div>
+  </div>
+  <div class="form-grid-4">
+    <div class="form-field"><label>Hotel nights</label><input name="hotel_nights" value="{{ item.metadata_json.get('hotel_nights', '') }}" placeholder="e.g. 2" /></div>
+    <div class="form-field"><label>Attendees</label><input name="attendees" value="{{ item.metadata_json.get('attendees', '') }}" placeholder="For meals >$100" /></div>
+    <div class="form-field"><label>Flight hours</label><input name="flight_duration_hours" value="{{ item.metadata_json.get('flight_duration_hours', '') }}" /></div>
+    <div class="form-field">
+      <label>Cabin</label>
+      <select name="flight_cabin_class">
+        <option value="">—</option>
+        {% set cabin = item.metadata_json.get('flight_cabin_class', '') %}
+        <option value="economy" {% if cabin == 'economy' %}selected{% endif %}>Economy</option>
+        <option value="premium_economy" {% if cabin == 'premium_economy' %}selected{% endif %}>Premium</option>
+        <option value="business" {% if cabin == 'business' %}selected{% endif %}>Business</option>
+        <option value="first" {% if cabin == 'first' %}selected{% endif %}>First</option>
+      </select>
+    </div>
+  </div>
+  <input type="hidden" name="employee_reviewed" value="on" />
+  <button class="btn btn-sm btn-primary" type="submit" style="width:100%;">Save</button>
+</form>
+
+<form
+  method="post"
+  action="/app/claims/{{ claim.id }}/items/{{ item.id }}/delete"
+  class="mt-1"
+  hx-post="/app/claims/{{ claim.id }}/items/{{ item.id }}/delete"
+  hx-target="#drawer-content"
+  hx-swap="innerHTML"
+  onsubmit="return confirm('Delete this item?');"
+>
+  <button class="btn btn-sm" type="submit" style="width:100%; color:var(--danger);">Delete item</button>
+</form>
+
+{% if next_review_item_id %}
+  <a
+    class="btn btn-sm mt-1"
+    style="width:100%; justify-content:center;"
+    href="/app/claims/{{ claim.id }}?edit_item_id={{ next_review_item_id }}#edit-item"
+    hx-get="/app/claims/{{ claim.id }}/items/{{ next_review_item_id }}/drawer"
+    hx-target="#drawer-content"
+    hx-swap="innerHTML"
+    data-drawer-open
+  >Next item needing review</a>
+{% endif %}
+
+{% if item_violations|length > 0 %}
+  <div class="policy-subtitle mt-2">Open policy checks</div>
+  <div class="policy-issues">
+    {% for v in item_violations %}
+      <div class="policy-issue">
+        <div class="policy-issue-top">
+          <div class="policy-issue-badges">
+            {% if v.severity.value == 'FAIL' %}
+              <span class="pill bad">FAIL</span>
+            {% elif v.severity.value == 'WARN' %}
+              <span class="pill warn">WARN</span>
+            {% elif v.severity.value == 'NEEDS_INFO' %}
+              <span class="pill info">NEEDS INFO</span>
+            {% else %}
+              <span class="pill">{{ v.severity.value.replace('_',' ') }}</span>
+            {% endif %}
+            {% if v.severity.value != 'FAIL' and (v.data_json or {}).get('submit_blocking') %}
+              <span class="pill bad">Blocks submit</span>
+            {% endif %}
+            <span class="pill">{{ v.rule_id }}</span>
+          </div>
+        </div>
+        <div class="policy-issue-title">{{ v.title }}</div>
+        <div class="muted">{{ v.message }}</div>
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% if evidences|length > 0 %}
+  <details class="mt-2" open>
+    <summary class="muted">Evidence ({{ evidences|length }})</summary>
+    {% for ev in evidences %}
+      <div class="policy-issue mt-1">
+        <div class="policy-issue-top">
+          <div class="policy-issue-badges">
+            <span class="pill">{{ ev.vendor }}</span>
+            <span class="pill">{{ ev.receipt_type }}</span>
+            {% if ev.page_start %}
+              <span class="pill">p{{ ev.page_start }}{% if ev.page_end and ev.page_end != ev.page_start %}-{{ ev.page_end }}{% endif %}</span>
+            {% endif %}
+          </div>
+          <div class="policy-issue-actions">
+            <a class="btn btn-xs" href="/app/documents/{{ ev.source_file_id }}/download" target="_blank">Open source</a>
+          </div>
+        </div>
+        <details class="mt-1">
+          <summary class="muted">Extracted text</summary>
+          <pre class="mono" style="white-space:pre-wrap; font-size:12px; margin:8px 0 0;">{{ ev.extracted_text }}</pre>
+        </details>
+      </div>
+    {% endfor %}
+  </details>
+{% endif %}

@@ -1,0 +1,19 @@
+<div class="drawer-header">
+  <div style="font-weight:600; color:var(--text-primary);">{{ title or "Update" }}</div>
+  <button class="btn btn-sm" type="button" data-drawer-close>Close</button>
+</div>
+
+<div class="callout {% if kind == 'error' %}error{% else %}success{% endif %} mt-1">{{ message }}</div>
+
+{% if next_review_item_id %}
+  <a
+    class="btn btn-sm mt-1"
+    style="width:100%; justify-content:center;"
+    href="/app/claims/{{ claim.id }}?edit_item_id={{ next_review_item_id }}#edit-item"
+    hx-get="/app/claims/{{ claim.id }}/items/{{ next_review_item_id }}/drawer"
+    hx-target="#drawer-content"
+    hx-swap="innerHTML"
+    data-drawer-open
+  >Next item needing review</a>
+{% endif %}
+

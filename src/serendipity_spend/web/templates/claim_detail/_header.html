@@ -1,0 +1,51 @@
+<div id="claim-header" class="claim-header" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+  <div>
+    <a href="/app" class="breadcrumb-link">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="15 18 9 12 15 6"></polyline>
+      </svg>
+      Claims
+    </a>
+    <h1 class="page-title mt-1">
+      {% if claim.purpose %}{{ claim.purpose|truncate(40) }}{% else %}Untitled claim{% endif %}
+    </h1>
+    <div class="claim-meta">
+      {% if claim.status.value == 'DRAFT' %}
+        <span class="pill">Draft</span>
+      {% elif claim.status.value == 'APPROVED' %}
+        <span class="pill ok">Approved</span>
+      {% elif claim.status.value == 'REJECTED' %}
+        <span class="pill bad">Rejected</span>
+      {% elif 'REVIEW' in claim.status.value %}
+        <span class="pill warn">In Review</span>
+      {% else %}
+        <span class="pill info">{{ claim.status.value }}</span>
+      {% endif %}
+      {% if claim.travel_start_date and claim.travel_end_date %}
+        <span class="muted">{{ claim.travel_start_date }} → {{ claim.travel_end_date }}</span>
+      {% endif %}
+      <span class="muted">{{ claim.home_currency }}</span>
+    </div>
+  </div>
+  <div class="btn-row">
+    <form method="post" action="/app/claims/{{ claim.id }}/export">
+      <button class="btn" type="submit">Export</button>
+    </form>
+    {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
+      <form method="post" action="/app/claims/{{ claim.id }}/submit">
+        <button class="btn btn-primary" type="submit">
+          {% if claim.status.value == 'CHANGES_REQUESTED' %}Resubmit{% else %}Submit for review{% endif %}
+        </button>
+      </form>
+    {% endif %}
+    {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
+      <form method="post" action="/app/claims/{{ claim.id }}/approve">
+        <button class="btn btn-primary" type="submit">Approve</button>
+      </form>
+      <form method="post" action="/app/claims/{{ claim.id }}/request-changes">
+        <button class="btn" type="submit">Request changes</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
