@@ -58,6 +58,7 @@ async def upload_document(
         celery_task_id=async_result.id,
         claim_id=str(claim.id),
         source_file_id=str(source.id),
+        filename=source.filename,
     )
     return SourceFileOut.model_validate(source, from_attributes=True)
 
@@ -99,6 +100,7 @@ async def upload_documents_batch(
                 celery_task_id=async_result.id,
                 claim_id=str(claim.id),
                 source_file_id=str(source.id),
+                filename=source.filename,
             )
             out.append(SourceFileOut.model_validate(source, from_attributes=True))
     return out
