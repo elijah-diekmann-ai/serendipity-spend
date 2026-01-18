@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
+from serendipity_spend.core.storage import diagnose_storage
 from serendipity_spend.modules.claims.api import router as claims_router
 from serendipity_spend.modules.documents.api import router as documents_router
 from serendipity_spend.modules.expenses.api import router as expenses_router
@@ -26,3 +28,10 @@ router.include_router(exports_router, prefix="/api")
 @router.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/healthz/storage")
+def healthz_storage(*, write_test: bool = False) -> JSONResponse:
+    result = diagnose_storage(write_test=write_test)
+    status_code = 200 if result.get("ok") else 503
+    return JSONResponse(status_code=status_code, content=result)

@@ -17,7 +17,13 @@ from starlette.datastructures import URL
 from serendipity_spend.core.config import settings
 from serendipity_spend.core.currencies import all_currency_codes, normalize_currency
 from serendipity_spend.core.db import db_session
-from serendipity_spend.core.logging import get_logger, get_request_id, log_event, set_user_context
+from serendipity_spend.core.logging import (
+    get_logger,
+    get_request_id,
+    log_event,
+    log_exception,
+    set_user_context,
+)
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
 from serendipity_spend.modules.claims.models import ClaimStatus
@@ -538,6 +544,7 @@ def claim_detail(
     approve_error = request.query_params.get("approve_error")
     approve_ok = request.query_params.get("approve_ok")
     delete_error = request.query_params.get("delete_error")
+    upload_error = request.query_params.get("upload_error")
     fx_error = request.query_params.get("fx_error")
     fx_invalid = request.query_params.get("fx_invalid")
     fx_skipped = request.query_params.get("fx_skipped")
@@ -576,6 +583,7 @@ def claim_detail(
             "approve_error": approve_error,
             "approve_ok": approve_ok,
             "delete_error": delete_error,
+            "upload_error": upload_error,
             "fx_error": fx_error,
             "fx_invalid": fx_invalid,
             "fx_skipped": fx_skipped,
@@ -861,14 +869,27 @@ async def upload_document_ui(
             content_type=f.content_type,
             byte_size=len(body),
         )
-        sources = create_source_files_from_upload(
-            session,
-            claim=claim,
-            user=user,
-            filename=f.filename or "upload.bin",
-            content_type=f.content_type,
-            body=body,
-        )
+        try:
+            sources = create_source_files_from_upload(
+                session,
+                claim=claim,
+                user=user,
+                filename=f.filename or "upload.bin",
+                content_type=f.content_type,
+                body=body,
+            )
+        except Exception:  # noqa: BLE001
+            log_exception(
+                logger,
+                "upload.failed",
+                claim_id=str(claim.id),
+                filename=f.filename or "upload.bin",
+                request_id=request_id,
+            )
+            msg = f"Upload failed (request_id={request_id}). Please retry in a moment."
+            return RedirectResponse(
+                url=f"/app/claims/{claim.id}?upload_error={quote(msg)}", status_code=303
+            )
         for source in sources:
             async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
             log_event(
