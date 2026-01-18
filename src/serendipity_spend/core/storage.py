@@ -106,14 +106,30 @@ class LocalObjectStorage(ObjectStorage):
 
 class S3ObjectStorage(ObjectStorage):
     def __init__(self) -> None:
+        # Handle Railway's "auto" region - boto3 needs a real region or None
+        region = settings.s3_region
+        if not region or region.lower() == "auto":
+            region = "us-east-1"  # Default region for S3-compatible services
+
         session = boto3.session.Session(
             aws_access_key_id=settings.s3_access_key_id,
             aws_secret_access_key=settings.s3_secret_access_key,
-            region_name=settings.s3_region or None,
+            region_name=region,
         )
         # Treat empty string as None (use default AWS endpoint)
         endpoint_url = settings.s3_endpoint_url or None
-        self._client = session.client("s3", endpoint_url=endpoint_url)
+
+        # Railway Bucket requires virtual-hosted-style URLs
+        # Configure boto3 to use virtual addressing style for S3-compatible endpoints
+        from botocore.config import Config
+
+        config = Config(
+            s3={"addressing_style": "virtual"},
+            retries={"max_attempts": 3, "mode": "adaptive"},
+            connect_timeout=30,
+            read_timeout=60,
+        )
+        self._client = session.client("s3", endpoint_url=endpoint_url, config=config)
         self._bucket = settings.s3_bucket
         self._ensure_bucket()
 
