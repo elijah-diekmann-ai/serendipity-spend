@@ -253,47 +253,7 @@ def _unpack_eml_upload(body: bytes) -> list[dict]:
 
     out: list[dict] = []
 
-    body_text = _extract_email_body_text(msg)
-    if body_text and body_text.strip():
-        subject = str(msg.get("subject") or "").strip()
-        from_header = str(msg.get("from") or "").strip()
-        from_name, from_addr = parseaddr(from_header)
-        from_name = str(from_name or "").strip()
-        sender_hint = from_name
-        if not sender_hint and "@" in from_addr:
-            sender_hint = from_addr.split("@", 1)[-1].strip()
-
-        email_date_iso = None
-        date_header = str(msg.get("date") or "").strip()
-        if date_header:
-            try:
-                email_date_iso = parsedate_to_datetime(date_header).date().isoformat()
-            except Exception:
-                email_date_iso = None
-
-        header_lines: list[str] = []
-        if sender_hint:
-            header_lines.append(sender_hint)
-        if subject:
-            header_lines.append(f"Subject: {subject}")
-        if from_header:
-            header_lines.append(f"From: {from_header}")
-        to_header = str(msg.get("to") or "").strip()
-        if to_header:
-            header_lines.append(f"To: {to_header}")
-
-        combined_text = "\n".join(header_lines) + "\n\n" + body_text.strip()
-        if email_date_iso:
-            combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
-        combined = (combined_text + "\n").encode("utf-8", errors="replace")
-        out.append(
-            {
-                "filename": _sanitize_filename(_email_body_filename(subject)) or "email-body.txt",
-                "content_type": "text/plain",
-                "body": combined,
-            }
-        )
-
+    attachments: list[dict] = []
     idx = 0
     for part in msg.iter_attachments():
         payload = part.get_payload(decode=True)
@@ -301,13 +261,61 @@ def _unpack_eml_upload(body: bytes) -> list[dict]:
             continue
         filename = part.get_filename() or f"attachment-{idx}"
         idx += 1
-        out.append(
+        attachments.append(
             {
                 "filename": _sanitize_filename(filename) or f"attachment-{idx}",
                 "content_type": part.get_content_type(),
                 "body": payload,
             }
         )
+
+    body_text = _extract_email_body_text(msg)
+    if body_text and body_text.strip():
+        include_body = True
+        if attachments and (not _email_body_looks_like_receipt(body_text)):
+            include_body = False
+        if include_body:
+            subject = str(msg.get("subject") or "").strip()
+            from_header = str(msg.get("from") or "").strip()
+            from_name, from_addr = parseaddr(from_header)
+            from_name = str(from_name or "").strip()
+            sender_hint = from_name
+            if not sender_hint and "@" in from_addr:
+                sender_hint = from_addr.split("@", 1)[-1].strip()
+
+            email_date_iso = None
+            date_header = str(msg.get("date") or "").strip()
+            if date_header:
+                try:
+                    email_date_iso = parsedate_to_datetime(date_header).date().isoformat()
+                except Exception:
+                    email_date_iso = None
+
+            header_lines: list[str] = []
+            if sender_hint:
+                header_lines.append(sender_hint)
+            if subject:
+                header_lines.append(f"Subject: {subject}")
+            if from_header:
+                header_lines.append(f"From: {from_header}")
+            to_header = str(msg.get("to") or "").strip()
+            if to_header:
+                header_lines.append(f"To: {to_header}")
+
+            combined_text = "\n".join(header_lines) + "\n\n" + body_text.strip()
+            if email_date_iso:
+                combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
+            combined = (combined_text + "\n").encode("utf-8", errors="replace")
+            out.append(
+                {
+                    "filename": _sanitize_filename(_email_body_filename(subject))
+                    or "email-body.txt",
+                    "content_type": "text/plain",
+                    "body": combined,
+                }
+            )
+
+    out.extend(attachments)
     return out
 
 
@@ -482,6 +490,24 @@ def _extract_email_body_text(msg) -> str:
     if parts_html:
         return _html_to_text("\n\n".join(parts_html))
     return ""
+
+
+def _email_body_looks_like_receipt(text: str) -> bool:
+    t = str(text or "")
+    if not t.strip():
+        return False
+    # Strong signals: currency-denominated totals or amounts (avoids saving forwarding-only bodies).
+    if re.search(r"(?i)\b(total|total paid|grand total|amount due|amount paid)\b", t) and re.search(
+        r"(?i)(US\\$|CA\\$|£|€|\\$)\\s*[0-9]", t
+    ):
+        return True
+    if re.search(r"(?i)(US\\$|CA\\$|£|€)\\s*[0-9][0-9,.'\\u202f\\xa0 ]*[0-9]", t):
+        return True
+    if re.search(r"\\$\\s*[0-9]+\\.[0-9]{2}\\b", t):
+        return True
+    if re.search(r"(?i)\\b[A-Z]{3}\\b\\s*[0-9]+\\.[0-9]{2}\\b", t):
+        return True
+    return False
 
 
 def _html_to_text(html: str) -> str:
