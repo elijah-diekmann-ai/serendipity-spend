@@ -86,7 +86,7 @@
   function severityColor(severity) {
     switch (severity) {
       case "FAIL":
-        return colors.danger;
+        return colors.warn;
       case "NEEDS_INFO":
         return colors.warn;
       case "WARN":

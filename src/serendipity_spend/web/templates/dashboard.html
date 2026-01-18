@@ -200,11 +200,11 @@
   <div class="card chart-card mt-3">
     <div class="card-header">
       <div>
-        <div class="card-title">Open policy violations</div>
-        <div class="card-subtitle">Severity mix across visible claims.</div>
+        <div class="card-title">Policy checks</div>
+        <div class="card-subtitle">Open issues by severity.</div>
       </div>
-      <div class="pill {% if blocked_claim_count > 0 %}warn{% else %}ok{% endif %}">
-        {{ blocked_claim_count }} blocking
+      <div class="pill {% if blocked_claim_count > 0 %}info{% else %}ok{% endif %}">
+        {{ blocked_claim_count }} need attention
       </div>
     </div>
     <div class="card-body">
@@ -213,11 +213,12 @@
       </div>
       <div class="muted mt-1" style="font-size: 12px;">
         {% if allow_pending_exceptions %}
-          Blocking reflects submit rules (pending exceptions don’t block).
+          Counts respect submit rules (pending exceptions don’t block).
         {% else %}
-          Blocking reflects approval rules.
+          Counts respect approval rules.
         {% endif %}
       </div>
     </div>
   </div>
+
 {% endblock %}

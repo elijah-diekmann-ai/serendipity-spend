@@ -712,8 +712,14 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
         PolicySeverity.WARN,
         PolicySeverity.PASS,
     ]
+    severity_labels = {
+        PolicySeverity.FAIL: "High",
+        PolicySeverity.NEEDS_INFO: "Needs info",
+        PolicySeverity.WARN: "Warn",
+        PolicySeverity.PASS: "Pass",
+    }
     violation_chart_rows = [
-        {"severity": s.value, "label": s.value.replace("_", " ").title(), "count": c}
+        {"severity": s.value, "label": severity_labels.get(s, s.value.title()), "count": c}
         for s in severity_order
         if (c := violation_severity_counts.get(s, 0)) > 0
     ]
