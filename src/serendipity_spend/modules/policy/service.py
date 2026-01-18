@@ -191,7 +191,9 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                 )
             )
 
-        # R040: generic extraction requires employee confirmation
+        # R040: generic extraction - internal extraction quality flag (non-blocking)
+        # This is tracked for audit purposes but does NOT block submission.
+        # Users can review items via the expense table if they want.
         if (
             _is_generic_extraction(item)
             and not bool(item.metadata_json.get("employee_reviewed"))
@@ -214,7 +216,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                     data={
                         "extraction_family": extraction_family,
                         "extraction_method": extraction_method,
-                        "submit_blocking": True,
+                        "submit_blocking": False,  # Not a policy violation, just quality info
                     },
                 )
             )

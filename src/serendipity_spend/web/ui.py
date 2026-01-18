@@ -298,11 +298,15 @@ def _build_claim_detail_context(
         d.status in {SourceFileStatus.UPLOADED, SourceFileStatus.PROCESSING} for d in docs
     )
 
-    basic_rules = {"R001", "R002"}
+    # Filter out:
+    # - R001/R002: Claim-level basics (purpose, dates) - shown elsewhere
+    # - R010: Uber trip summary warning - internal extraction quality, not policy
+    # - R040: Generic extraction review - internal extraction quality, not policy
+    internal_rules = {"R001", "R002", "R010", "R040"}
     receipt_violations = [
         v
         for v in open_violations
-        if v.rule_id not in basic_rules and v.status == ViolationStatus.OPEN
+        if v.rule_id not in internal_rules and v.status == ViolationStatus.OPEN
     ]
     has_receipt_issues = len(receipt_violations) > 0
 
