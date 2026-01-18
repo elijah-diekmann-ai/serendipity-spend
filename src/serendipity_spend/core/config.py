@@ -34,6 +34,9 @@ class Settings(BaseSettings):
 
     access_token_exp_minutes: int = 60 * 24
 
+    # Optional: automatically fetch FX rates (Frankfurter) during extraction in production.
+    fx_auto_enabled: bool | None = None
+
     # Optional AI-assisted receipt understanding
     receipt_ai_enabled: bool = False
     receipt_ai_timeout_seconds: float = 20.0

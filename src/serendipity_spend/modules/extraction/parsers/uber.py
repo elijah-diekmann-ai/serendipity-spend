@@ -100,6 +100,73 @@ def parse_uber_trip_summary(summary_page: str, detail_page: str) -> ParsedExpens
     )
 
 
+def parse_uber_email_receipt(text: str) -> ParsedExpense | None:
+    if not re.search(r"(?i)\btrip\s+with\s+u\s*b\s*e\s*r\b", text) or not re.search(
+        r"(?i)\btota[li]\b", text
+    ):
+        return None
+
+    m = re.search(
+        r"(?i)\btotal\b\s*[:\-]?\s*(CA\$|US\$|\$)\s*"
+        r"([0-9][0-9,.'\u202f\xa0 ]*[0-9])(?=[^0-9]|$)",
+        text,
+    )
+    if not m:
+        return None
+
+    sym, amount_str = m.groups()
+    if sym == "CA$":
+        currency = "CAD"
+    elif sym == "US$":
+        currency = "USD"
+    else:
+        # '$' is ambiguous; infer from other currency hints when possible.
+        has_cad = "CA$" in text
+        has_usd = "US$" in text
+        if has_cad and not has_usd:
+            currency = "CAD"
+        elif has_usd and not has_cad:
+            currency = "USD"
+        else:
+            return None
+
+    amount = _parse_amount_decimal(amount_str)
+    if amount is None:
+        return None
+
+    # Uber receipt emails include a well-formed "Date: 12 January 2026 ..." header.
+    trip_date = None
+    m = re.search(r"(?i)\bdate:\s*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})\b", text)
+    if m:
+        s = m.group(1)
+        for fmt in ("%d %b %Y", "%d %B %Y"):
+            try:
+                trip_date = datetime.strptime(s, fmt).date()
+                break
+            except ValueError:
+                continue
+
+    is_payment_receipt = "not a payment receipt" not in text.lower()
+
+    return ParsedExpense(
+        vendor="Uber",
+        vendor_reference=None,
+        receipt_type="trip_summary",
+        category="transport",
+        description="Uber trip",
+        transaction_date=trip_date,
+        amount=amount,
+        currency=currency,
+        metadata={
+            "extraction_family": "vendor",
+            "extraction_method": "vendor",
+            "extraction_confidence": 0.9,
+            "employee_reviewed": False,
+            "is_payment_receipt": is_payment_receipt,
+        },
+    )
+
+
 def _parse_amount_decimal(s: str) -> Decimal | None:
     raw = str(s or "").strip()
     if not raw:

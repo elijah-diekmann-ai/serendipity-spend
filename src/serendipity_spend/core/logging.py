@@ -6,7 +6,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -28,7 +28,7 @@ _configured = False
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat()
+        ts = datetime.fromtimestamp(record.created, tz=UTC).isoformat()
         if ts.endswith("+00:00"):
             ts = ts[:-6] + "Z"
         payload: dict[str, Any] = {

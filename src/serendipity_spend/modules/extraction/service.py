@@ -5,7 +5,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
@@ -36,8 +36,14 @@ from serendipity_spend.modules.extraction.parsers.baggage_fee import (
     parse_baggage_fee_payment_receipt,
 )
 from serendipity_spend.modules.extraction.parsers.grab import parse_grab_ride_receipt
-from serendipity_spend.modules.extraction.parsers.uber import parse_uber_trip_summary
+from serendipity_spend.modules.extraction.parsers.uber import (
+    parse_uber_email_receipt,
+    parse_uber_trip_summary,
+)
 from serendipity_spend.modules.extraction.parsers.united_wifi import parse_united_wifi_receipt
+from serendipity_spend.modules.extraction.parsers.wifionboard import (
+    parse_wifionboard_receipt,
+)
 from serendipity_spend.modules.fx.models import FxRate
 from serendipity_spend.modules.workflow.models import Task, TaskStatus
 
@@ -186,6 +192,8 @@ def extract_source_file(*, source_file_id: str) -> None:
                     duration_ms=monotonic_ms(start),
                 )
                 return
+
+            _maybe_auto_fx(session=session, claim=claim)
 
             from serendipity_spend.modules.policy.service import evaluate_claim
 
@@ -368,7 +376,11 @@ def _process_pdf_bundle(*, session, claim: Claim, source: SourceFile, body: byte
             else:
                 _append_parse_failure(parse_failures, "ai_fallback", reason)
         if not parsed:
-            parsed, reason = _parse_generic_receipt(seg_text, extraction_method="generic_fallback")
+            parsed, reason = _parse_generic_receipt(
+                seg_text,
+                extraction_method="generic_fallback",
+                vendor_hint=seg.vendor,
+            )
             if parsed:
                 parser_used = "generic_fallback"
             else:
@@ -512,7 +524,11 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         else:
             _append_parse_failure(parse_failures, "ai_image", reason)
     if not parsed:
-        parsed, reason = _parse_generic_receipt(text)
+        parsed, reason = _parse_generic_receipt(
+            text,
+            extraction_method="generic_image",
+            vendor_hint=vendor,
+        )
         if parsed:
             parser_used = "generic"
         else:
@@ -525,6 +541,17 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
         if receipt_type == "unknown":
             receipt_type = parsed.receipt_type
         confidence = max(confidence, float(parsed.metadata.get("extraction_confidence") or 0.0))
+        if parsed.transaction_date is None:
+            inferred = _infer_transaction_date_for_image(
+                filename=source.filename,
+                claim=claim,
+                category=parsed.category,
+                metadata=parsed.metadata,
+            )
+            if inferred and is_dataclass(parsed):
+                metadata = dict(parsed.metadata or {})
+                metadata.setdefault("transaction_date_inferred_from", "filename")
+                parsed = replace(parsed, transaction_date=inferred, metadata=metadata)
 
     evidence = EvidenceDocument(
         source_file_id=source.id,
@@ -641,7 +668,11 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
         else:
             _append_parse_failure(parse_failures, "ai_text", reason)
     if not parsed:
-        parsed, reason = _parse_generic_receipt(text, extraction_method="generic")
+        parsed, reason = _parse_generic_receipt(
+            text,
+            extraction_method="generic_text",
+            vendor_hint=vendor,
+        )
         if parsed:
             parser_used = "generic"
         else:
@@ -964,11 +995,20 @@ def _is_baggage_fee(text: str) -> bool:
     return bool(re.search(r"(?i)\bpayment\s+receipt\b", t) and re.search(r"(?i)\bbag\s*fee\b", t))
 
 
+def _is_wifionboard_receipt(text: str) -> bool:
+    t = (text or "").replace("\u202f", " ").replace("\xa0", " ")
+    if not re.search(r"(?i)\bwif[\u2011-]?fi\s+onboard\b|\bwifionboard\b", t):
+        return False
+    return bool(re.search(r"(?i)\btotal\s+paid\b|\border\b", t))
+
+
 def _classify_text(text: str) -> tuple[str, str, float]:
     if _is_baggage_fee(text):
         return "Airline", "payment_receipt", 0.9
     if _is_united_start(text):
         return "United Airlines", "email_receipt", 0.9
+    if _is_wifionboard_receipt(text):
+        return "Wi-Fi Onboard", "wifi_receipt", 0.8
     if _is_grab_start(text):
         return "Grab", "ride_receipt", 0.6
     if _is_uber_start(text):
@@ -1047,6 +1087,38 @@ def _parse_uber_with_reason(summary_page: str, detail_page: str):
     return None, "uber_parse_failed"
 
 
+def _parse_uber_email_with_reason(text: str):
+    parsed = parse_uber_email_receipt(text)
+    if parsed:
+        return parsed, None
+    if not re.search(r"(?i)\btrip\s+with\s+u\s*b\s*e\s*r\b", text):
+        return None, "missing_trip_header"
+    if not re.search(r"(?i)\btota[li]\b", text):
+        return None, "missing_total_label"
+    m = re.search(
+        r"(?i)\btotal\b\s*[:\-]?\s*(CA\$|US\$|\$)\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])",
+        text,
+    )
+    if not m:
+        return None, "missing_total_amount"
+    if _parse_decimal_amount(m.group(2)) is None:
+        return None, "amount_parse_failed"
+    return None, "uber_email_parse_failed"
+
+
+def _parse_wifionboard_with_reason(text: str):
+    parsed = parse_wifionboard_receipt(text)
+    if parsed:
+        return parsed, None
+    if not _is_wifionboard_receipt(text):
+        return None, "missing_header"
+    if not re.search(r"(?i)\btotal\s+paid\b", text):
+        return None, "missing_total_label"
+    if not re.search(r"(?is)\btotal\s+paid\b.*?\b([0-9][0-9,.'\u202f\xa0 ]*[0-9])\b", text):
+        return None, "missing_total_amount"
+    return None, "wifionboard_parse_failed"
+
+
 def _parse_baggage_fee_with_reason(text: str):
     parsed = parse_baggage_fee_payment_receipt(text)
     if parsed:
@@ -1078,9 +1150,18 @@ def _parse_segment(*, seg: Segment, pages: list[str]) -> tuple[object | None, st
     return None, "unsupported_segment"
 
 
-def _parse_single_text(*, vendor: str, receipt_type: str, text: str) -> tuple[object | None, str | None]:
+def _parse_single_text(
+    *,
+    vendor: str,
+    receipt_type: str,
+    text: str,
+) -> tuple[object | None, str | None]:
+    if vendor == "Uber" and receipt_type == "trip_summary":
+        return _parse_uber_email_with_reason(text)
     if vendor == "United Airlines":
         return _parse_united_with_reason(text)
+    if vendor == "Wi-Fi Onboard" and receipt_type == "wifi_receipt":
+        return _parse_wifionboard_with_reason(text)
     if vendor == "Airline" and receipt_type == "payment_receipt":
         return _parse_baggage_fee_with_reason(text)
     return None, "unsupported_vendor"
@@ -1115,6 +1196,74 @@ def _convert_to_home(
     if not fx:
         return None, None
     return (amount * fx.rate).quantize(Decimal("0.01")), fx.rate
+
+
+def _fx_auto_enabled() -> bool:
+    if settings.fx_auto_enabled is not None:
+        return bool(settings.fx_auto_enabled)
+    return str(settings.environment or "").lower() != "dev"
+
+
+def _maybe_auto_fx(*, session, claim: Claim) -> None:
+    if not _fx_auto_enabled():
+        return
+
+    to_currency = normalize_currency(claim.home_currency)
+    if not to_currency or to_currency == "XXX":
+        return
+
+    missing = {
+        normalize_currency(str(c).upper())
+        for c in session.scalars(
+            select(ExpenseItem.amount_original_currency).where(
+                ExpenseItem.claim_id == claim.id,
+                ExpenseItem.amount_home_amount.is_(None),
+            )
+        )
+        if c
+    }
+    missing.discard(None)
+    missing.discard(to_currency)
+    missing.discard("XXX")
+    if not missing:
+        return
+
+    from serendipity_spend.modules.fx.service import auto_upsert_fx_rates
+
+    start = time.monotonic()
+    log_event(
+        logger,
+        "fx.auto.start",
+        claim_id=str(claim.id),
+        to_currency=to_currency,
+        from_currencies=sorted(missing),
+    )
+    try:
+        rates, skipped = auto_upsert_fx_rates(
+            session,
+            claim_id=claim.id,
+            to_currency=to_currency,
+            from_currencies=sorted(missing),
+        )
+        log_event(
+            logger,
+            "fx.auto.finish",
+            claim_id=str(claim.id),
+            to_currency=to_currency,
+            from_currencies=sorted(missing),
+            rates_count=len(rates),
+            skipped=sorted(skipped),
+            duration_ms=monotonic_ms(start),
+        )
+    except Exception:
+        log_exception(
+            logger,
+            "fx.auto.error",
+            claim_id=str(claim.id),
+            to_currency=to_currency,
+            from_currencies=sorted(missing),
+            duration_ms=monotonic_ms(start),
+        )
 
 
 def _upsert_item_and_link_evidence(
@@ -1354,6 +1503,7 @@ def _process_page_ranges(
                 parsed, reason = _parse_generic_receipt(
                     page_text,
                     extraction_method="generic_page",
+                    vendor_hint=vendor,
                 )
                 if parsed:
                     parser_used = "generic_page"
@@ -1453,6 +1603,7 @@ def _process_page_ranges(
                 parsed, reason = _parse_generic_receipt(
                     page_text,
                     extraction_method="generic_page",
+                    vendor_hint=vendor,
                 )
                 if parsed:
                     parser_used = "generic_page"
@@ -1589,6 +1740,7 @@ def _process_page_ranges(
             parsed, reason = _parse_generic_receipt(
                 combined_text,
                 extraction_method="generic_multi_page",
+                vendor_hint=vendor,
             )
             if parsed:
                 parser_used = "generic_multi_page"
@@ -1913,13 +2065,19 @@ def _parse_receipt_with_ai(
     )
 
 
-def _parse_generic_receipt(text: str, *, extraction_method: str = "generic"):
+def _parse_generic_receipt(
+    text: str,
+    *,
+    extraction_method: str = "generic",
+    vendor_hint: str | None = None,
+):
     total = _extract_total_amount(text)
     if not total:
         return None, "generic_missing_total"
     currency, amount = total
     tx_date = _extract_any_date(text)
-    vendor = _extract_vendor_name(text) or "Unknown"
+    vendor = vendor_hint if (vendor_hint and vendor_hint != "Unknown") else None
+    vendor = vendor or _extract_vendor_name(text) or "Unknown"
     category = _guess_category(text)
 
     metadata: dict = {
@@ -1967,6 +2125,18 @@ def _guess_category(text: str) -> str | None:
     t = text.lower()
 
     lodging_strong = ("check-in", "check in", "check-out", "check out", "folio", "room rate")
+    transport_strong = (
+        "trip with uber",
+        "uber receipts",
+        "uber",
+        "grab",
+        "pickup",
+        "dropoff",
+        "driver",
+        "ride",
+        "miles",
+        "kilometers",
+    )
     airfare_strong = (
         "boarding pass",
         "e-ticket",
@@ -1980,15 +2150,20 @@ def _guess_category(text: str) -> str | None:
         "seat",
     )
     meals_strong = ("gratuity", "tip", "server", "table", "covers", "pax", "guests")
+    ancillary_strong = ("wifi", "wi-fi", "wifionboard", "inflight", "in-flight", "flight pass")
 
-    scores = {"lodging": 0, "airfare": 0, "meals": 0}
+    scores = {"lodging": 0, "airfare": 0, "meals": 0, "transport": 0, "travel_ancillary": 0}
 
     if any(k in t for k in lodging_strong) or "hotel" in t:
         scores["lodging"] += 2
+    if any(k in t for k in transport_strong):
+        scores["transport"] += 3
     if any(k in t for k in airfare_strong) or "flight" in t:
         scores["airfare"] += 2
     if any(k in t for k in meals_strong) or any(k in t for k in ("restaurant", "cafe", "bar")):
         scores["meals"] += 2
+    if any(k in t for k in ancillary_strong):
+        scores["travel_ancillary"] += 3
 
     # Softer signals
     for k in ("reservation", "stay", "room", "nights"):
@@ -2000,6 +2175,12 @@ def _guess_category(text: str) -> str | None:
     for k in ("subtotal", "tax", "dine", "dining", "beverage"):
         if k in t:
             scores["meals"] += 1
+    for k in ("taxi", "toll", "surcharge", "airport"):
+        if k in t:
+            scores["transport"] += 1
+    for k in ("onboard", "pass", "subscription"):
+        if k in t:
+            scores["travel_ancillary"] += 1
 
     best = max(scores, key=scores.get)
     if scores[best] < 2:
@@ -2372,12 +2553,12 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
         r")\b",
         re.I,
     )
-    candidates: list[tuple[str, Decimal]] = []
+    candidates: list[tuple[str, Decimal, int]] = []
 
     def add_candidates_from_line(ln: str) -> None:
         # Prefer explicit currency codes (optionally with a currency symbol).
         for m in re.finditer(
-            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])\b",
+            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])(?=[^\d]|$)",
             ln,
         ):
             cur, amt = m.groups()
@@ -2386,11 +2567,12 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
                 continue
             amount = _parse_decimal_amount(amt)
             if amount is not None:
-                candidates.append((cur_norm, amount))
+                candidates.append((cur_norm, amount, 30))
 
         # Symbol-prefixed amounts.
         for m in re.finditer(
-            r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])\b", ln
+            r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])(?=[^\d]|$)",
+            ln,
         ):
             sym, amt = m.groups()
             cur = {"$": "XXX", "US$": "USD", "CA$": "CAD", "£": "GBP", "€": "EUR"}.get(sym)
@@ -2399,7 +2581,7 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
                 continue
             amount = _parse_decimal_amount(amt)
             if amount is not None:
-                candidates.append((cur_norm, amount))
+                candidates.append((cur_norm, amount, 20 if cur_norm != "XXX" else 0))
 
         # Amount followed by currency code.
         for m in re.finditer(
@@ -2412,7 +2594,7 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
                 continue
             amount = _parse_decimal_amount(amt)
             if amount is not None:
-                candidates.append((cur_norm, amount))
+                candidates.append((cur_norm, amount, 25))
 
     for i, ln in enumerate(lines):
         if not keyword_re.search(ln):
@@ -2428,8 +2610,9 @@ def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
             add_candidates_from_line(ln)
         if not candidates:
             return None
-    # Use the largest amount found on "total" lines.
-    return max(candidates, key=lambda x: x[1])
+    # Use the largest amount found (prefer explicit currencies when tied).
+    cur, amt, _ = max(candidates, key=lambda x: (x[1], x[2]))
+    return cur, amt
 
 
 def _parse_decimal_amount(raw: str) -> Decimal | None:
@@ -2510,70 +2693,206 @@ def _is_plausible_receipt_date(d: date) -> bool:
 
 
 def _extract_any_date(text: str):
-    # ISO date: 2025-09-05
-    m = re.search(r"\b([0-9]{4}-[0-9]{2}-[0-9]{2})\b", text)
-    if m:
+    def parse_candidate(t: str) -> date | None:
+        # ISO date: 2025-09-05
+        m = re.search(r"\b([0-9]{4}-[0-9]{2}-[0-9]{2})\b", t)
+        if m:
+            try:
+                d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+                if _is_plausible_receipt_date(d):
+                    return d
+            except ValueError:
+                pass
+
+        # 05 Sep 2025 / 05 September 2025
+        m = re.search(r"\b([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})\b", t)
+        if m:
+            s = m.group(1)
+            for fmt in ("%d %b %Y", "%d %B %Y"):
+                try:
+                    d = datetime.strptime(s, fmt).date()
+                    if _is_plausible_receipt_date(d):
+                        return d
+                except ValueError:
+                    continue
+
+        # Sep 05, 2025 / September 5, 2025
+        m = re.search(r"\b([A-Za-z]{3,9}\s+[0-9]{1,2},\s+[0-9]{4})\b", t)
+        if m:
+            s = m.group(1)
+            for fmt in ("%b %d, %Y", "%B %d, %Y"):
+                try:
+                    d = datetime.strptime(s, fmt).date()
+                    if _is_plausible_receipt_date(d):
+                        return d
+                except ValueError:
+                    continue
+
+        # Sep 05 2025 / September 5 2025 (no comma)
+        m = re.search(r"\b([A-Za-z]{3,9}\s+[0-9]{1,2}\s+[0-9]{4})\b", t)
+        if m:
+            s = m.group(1)
+            for fmt in ("%b %d %Y", "%B %d %Y"):
+                try:
+                    d = datetime.strptime(s, fmt).date()
+                    if _is_plausible_receipt_date(d):
+                        return d
+                except ValueError:
+                    continue
+
+        # 31AUG25
+        m = re.search(r"\b([0-9]{2}[A-Za-z]{3}[0-9]{2})\b", t)
+        if m:
+            try:
+                d = datetime.strptime(m.group(1).title(), "%d%b%y").date()
+                if _is_plausible_receipt_date(d):
+                    return d
+            except ValueError:
+                pass
+
+        # 12/31/2025 or 31/12/2025
+        m = re.search(r"\b([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\b", t)
+        if m:
+            s = m.group(1)
+            a, b, c = s.split("/")
+            try:
+                aa, bb, _ = int(a), int(b), int(c)
+            except ValueError:
+                aa = bb = 0
+            # Prefer month/day when unambiguous, otherwise try day/month.
+            for fmt in (
+                ("%m/%d/%Y", aa <= 12 and bb <= 31),
+                ("%d/%m/%Y", bb <= 12 and aa <= 31),
+            ):
+                f, ok = fmt
+                if not ok:
+                    continue
+                try:
+                    d = datetime.strptime(s, f).date()
+                    if _is_plausible_receipt_date(d):
+                        return d
+                except ValueError:
+                    continue
+
+        # 1/11/26 or 11/1/26 (two-digit year)
+        m = re.search(r"\b([0-9]{1,2}/[0-9]{1,2}/[0-9]{2})\b", t)
+        if m:
+            s = m.group(1)
+            a, b, c = s.split("/")
+            try:
+                aa, bb, _ = int(a), int(b), int(c)
+            except ValueError:
+                aa = bb = 0
+            for fmt in (
+                ("%m/%d/%y", aa <= 12 and bb <= 31),
+                ("%d/%m/%y", bb <= 12 and aa <= 31),
+            ):
+                f, ok = fmt
+                if not ok:
+                    continue
+                try:
+                    d = datetime.strptime(s, f).date()
+                    if _is_plausible_receipt_date(d):
+                        return d
+                except ValueError:
+                    continue
+
+        return None
+
+    # Prefer dates in receipt content over the EmailDate metadata line we append during .eml/.msg
+    # ingestion. If no other date is present, fall back to EmailDate.
+    raw = text or ""
+    without_emaildate = "\n".join(
+        ln for ln in raw.splitlines() if not ln.strip().lower().startswith("emaildate:")
+    )
+    return parse_candidate(without_emaildate) or parse_candidate(raw)
+
+
+def _infer_transaction_date_for_image(
+    *,
+    filename: str,
+    claim: Claim,
+    category: str | None,
+    metadata: dict | None,
+) -> date | None:
+    cat = str(category or "").strip().lower()
+    md = metadata if isinstance(metadata, dict) else {}
+
+    # Prefer explicit hotel check-in when present.
+    raw_check_in = md.get("hotel_check_in")
+    if isinstance(raw_check_in, str):
         try:
-            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-            if _is_plausible_receipt_date(d):
-                return d
-        except ValueError:
+            return date.fromisoformat(raw_check_in)
+        except Exception:
             pass
 
-    # 05 Sep 2025 / 05 September 2025
-    m = re.search(r"\b([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})\b", text)
-    if m:
-        s = m.group(1)
-        for fmt in ("%d %b %Y", "%d %B %Y"):
+    # For lodging-ish receipts, fall back to filename hints (e.g., "12-13th Jan").
+    is_lodging = cat in {"lodging", "hotel"} or bool(md.get("hotel_nights"))
+    if not is_lodging:
+        return None
+
+    name = os.path.basename(str(filename or ""))
+    stem = os.path.splitext(name)[0].replace("_", " ")
+
+    def parse_month(s: str) -> int | None:
+        ss = s.strip()
+        if not ss:
+            return None
+        for fmt in ("%b", "%B"):
             try:
-                d = datetime.strptime(s, fmt).date()
-                if _is_plausible_receipt_date(d):
-                    return d
+                return datetime.strptime(ss.title(), fmt).month
             except ValueError:
                 continue
+        return None
 
-    # Sep 05, 2025 / September 5, 2025
-    m = re.search(r"\b([A-Za-z]{3,9}\s+[0-9]{1,2},\s+[0-9]{4})\b", text)
+    m = re.search(
+        r"(?i)\b([0-9]{1,2})\s*[-–]\s*([0-9]{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})(?:\s+([0-9]{4}))?\b",
+        stem,
+    )
+    day = month = year = None
     if m:
-        s = m.group(1)
-        for fmt in ("%b %d, %Y", "%B %d, %Y"):
-            try:
-                d = datetime.strptime(s, fmt).date()
-                if _is_plausible_receipt_date(d):
-                    return d
-            except ValueError:
-                continue
+        day = int(m.group(1))
+        month = parse_month(m.group(3))
+        year = int(m.group(4)) if m.group(4) else None
+    else:
+        m = re.search(
+            r"(?i)\b([0-9]{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})(?:\s+([0-9]{4}))?\b",
+            stem,
+        )
+        if m:
+            day = int(m.group(1))
+            month = parse_month(m.group(2))
+            year = int(m.group(3)) if m.group(3) else None
 
-    # 31AUG25
-    m = re.search(r"\b([0-9]{2}[A-Za-z]{3}[0-9]{2})\b", text)
-    if m:
+    if not day or not month:
+        return None
+
+    candidate_years: list[int] = []
+    if year:
+        candidate_years = [year]
+    else:
+        if claim.travel_start_date:
+            candidate_years.append(claim.travel_start_date.year)
+        if claim.travel_end_date:
+            candidate_years.append(claim.travel_end_date.year)
+        if not candidate_years:
+            candidate_years = [date.today().year]
+
+    travel_start = claim.travel_start_date
+    travel_end = claim.travel_end_date
+    travel_window_start = travel_start - timedelta(days=7) if travel_start else None
+    travel_window_end = travel_end + timedelta(days=7) if travel_end else None
+
+    for y in list(dict.fromkeys(candidate_years)):
         try:
-            d = datetime.strptime(m.group(1).title(), "%d%b%y").date()
-            if _is_plausible_receipt_date(d):
-                return d
+            candidate = date(y, month, day)
         except ValueError:
-            pass
-
-    # 12/31/2025 or 31/12/2025
-    m = re.search(r"\b([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})\b", text)
-    if m:
-        s = m.group(1)
-        a, b, c = s.split("/")
-        try:
-            aa, bb, _ = int(a), int(b), int(c)
-        except ValueError:
-            aa = bb = 0
-        # Prefer month/day when unambiguous, otherwise try day/month.
-        for fmt in (("%m/%d/%Y", aa <= 12 and bb <= 31), ("%d/%m/%Y", bb <= 12 and aa <= 31)):
-            f, ok = fmt
-            if not ok:
-                continue
-            try:
-                d = datetime.strptime(s, f).date()
-                if _is_plausible_receipt_date(d):
-                    return d
-            except ValueError:
-                continue
+            continue
+        if travel_window_start and travel_window_end:
+            if travel_window_start <= candidate <= travel_window_end:
+                return candidate
+        if _is_plausible_receipt_date(candidate):
+            return candidate
 
     return None
 
