@@ -128,27 +128,6 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
             usd_to_home = fx.rate
 
     for item in items:
-        if item.vendor == "Uber" and item.receipt_type == "trip_summary":
-            issues.append(
-                Issue(
-                    dedupe_key=f"item:{item.id}:R010",
-                    claim_id=claim.id,
-                    expense_item_id=item.id,
-                    rule_id="R010",
-                    severity=PolicySeverity.NEEDS_INFO,
-                    title="Uber trip summary may be insufficient",
-                    message=(
-                        "This document indicates it is not a payment receipt. "
-                        "Upload a payment receipt or provide justification."
-                    ),
-                    data={
-                        "vendor": "Uber",
-                        "receipt_type": "trip_summary",
-                        "submit_blocking": False,
-                    },
-                )
-            )
-
         if (
             item.vendor == "Grab"
             and str(item.metadata_json.get("profile", "")).upper() == "PERSONAL"

@@ -215,7 +215,6 @@ policy_contract:
   rules_currently_implemented:
     - R001 FAIL: claim.purpose missing/blank (blocks submit)
     - R002 FAIL: travel dates missing (blocks submit)
-    - R010 NEEDS_INFO: Uber trip_summary may be insufficient (not blocking)
     - R020 WARN: Grab metadata.profile == PERSONAL (not blocking)
     - R031 NEEDS_INFO: invalid currency code (submit_blocking)
     - R030 NEEDS_INFO: missing FX to home currency (submit_blocking)

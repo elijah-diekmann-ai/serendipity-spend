@@ -86,9 +86,27 @@ def extract_source_file(*, source_file_id: str) -> None:
         )
 
         if source.status == SourceFileStatus.PROCESSED:
+            log_event(
+                logger,
+                "extraction.finish",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                status="skipped",
+                reason="already_processed",
+                duration_ms=monotonic_ms(start),
+            )
             return
 
         if not _try_start_source_processing(session=session, source=source):
+            log_event(
+                logger,
+                "extraction.finish",
+                source_file_id=str(source.id),
+                claim_id=str(claim.id),
+                status="skipped",
+                reason="already_processing",
+                duration_ms=monotonic_ms(start),
+            )
             return
 
         _cleanup_source_file_evidence(session=session, source_id=source.id)

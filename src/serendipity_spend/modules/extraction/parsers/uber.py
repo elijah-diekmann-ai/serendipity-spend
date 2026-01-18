@@ -365,8 +365,14 @@ def _extract_trip_date_time(text: str) -> tuple[date | None, time | None]:
 def _clean_for_regex(text: str) -> str:
     t = (text or "").replace("\u202f", " ").replace("\xa0", " ").replace("\t", " ")
     t = _URL_RE.sub(" ", t)
-    # Help with artifacts like "Comfort6.98" and "12:439 Oxford" (time followed by a digit).
+    # Help with artifacts like:
+    # - "Comfort6.98" (missing space between words and numbers)
+    # - "US$21.86Airport" (missing space between amounts and the next label)
+    # - "USYou rode with" (missing space between concatenated words)
+    # - "12:439 Oxford" (time followed by a digit)
     t = re.sub(r"([A-Za-z])([0-9])", r"\1 \2", t)
+    t = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", t)
+    t = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", t)
     t = re.sub(r"(\b[0-2]?[0-9]:[0-5][0-9])(?=[0-9])", r"\1 ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
@@ -380,12 +386,12 @@ def _extract_breakdown(text: str) -> list[dict]:
     if not m:
         return []
     tail = t[m.start() :]
-    tail = re.split(r"(?i)\b(trip details|need help|payments)\b", tail, maxsplit=1)[0]
+    tail = re.split(r"(?i)\b(trip details|need help)\b", tail, maxsplit=1)[0]
 
     entries: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for m2 in re.finditer(
-        r"(?i)\b([A-Za-z][A-Za-z0-9 .,&/\-]{1,60}?)\b\s*(CA\$|US\$|\$)\s*"
+        r"(?i)\b([A-Za-z][A-Za-z0-9 ,&/\-]{1,60}?)\b\s*(CA\$|US\$|\$)\s*"
         r"([0-9][0-9,.' ]*[0-9])\b",
         tail,
     ):
@@ -445,13 +451,20 @@ def _extract_trip_details(text: str) -> dict:
         pickup_time, pickup_location, dropoff_time, dropoff_location = m.groups()
         pickup_location = pickup_location.strip(" -\u2013\u2014")
         dropoff_location = dropoff_location.strip(" -\u2013\u2014")
+
+        # Some Uber emails contain a duplicated pickup/dropoff block after the dropoff location,
+        # e.g. "... 600 Atlantic Ave ... 12:43 9 Oxford St ...". Strip any repeated time blocks
+        # to keep the location stable and employee-friendly.
+        dropoff_location = re.split(r"\b[0-2]?[0-9]:[0-5][0-9]\b", dropoff_location, maxsplit=1)[
+            0
+        ].strip()
         out["pickup_time"] = pickup_time
         out["pickup_location"] = pickup_location[:300] if pickup_location else None
         out["dropoff_time"] = dropoff_time
         out["dropoff_location"] = dropoff_location[:300] if dropoff_location else None
 
     m = re.search(
-        r"\bYou rode with\s+([A-Za-z][A-Za-z .'-]{0,40})\s*([0-9]\.[0-9]{1,2})?",
+        r"(?i)You rode with\s+([A-Za-z][A-Za-z .'-]{0,40})\s*([0-9]\.[0-9]{1,2})?",
         details,
     )
     if m:

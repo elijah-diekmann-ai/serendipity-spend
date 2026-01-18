@@ -35,7 +35,6 @@ Automates the intake-to-approval workflow.
 
 - Claim purpose required (`R001`, FAIL)
 - Travel dates required (`R002`, FAIL)
-- Uber trip summary may be insufficient (`R010`, NEEDS_INFO)
 - Grab receipt indicates PERSONAL profile (`R020`, WARN)
 - Missing FX rate to home currency (`R030`, NEEDS_INFO)
 - Invalid currency code (`R031`, NEEDS_INFO)
