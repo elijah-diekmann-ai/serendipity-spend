@@ -1,87 +1,143 @@
 {% extends "base.html" %}
 {% block content %}
-  <div class="page-header">
-    <div class="page-header-content">
-      <div>
-        <h1 class="page-title">Claims</h1>
-        <p class="text-secondary mt-1">Create a claim, upload receipts, review policy flags, then submit.</p>
-      </div>
-      <a class="btn btn-primary" href="/app/claims/new">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="5" x2="12" y2="19"></line>
-          <line x1="5" y1="12" x2="19" y2="12"></line>
-        </svg>
-        New claim
-      </a>
-    </div>
+  <div class="dashboard-header">
+    <h1 class="page-title">Claims</h1>
+    <a class="btn btn-primary" href="/app/claims/new">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="5" x2="12" y2="19"></line>
+        <line x1="5" y1="12" x2="19" y2="12"></line>
+      </svg>
+      New claim
+    </a>
   </div>
 
-  <div class="card dashboard-card dashboard-card--blue">
-    <div class="card-body">
-      {% if claims|length == 0 %}
-        <div class="empty-state">
-          <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-          </svg>
-          <p>No claims yet. Create one to get started.</p>
-        </div>
-      {% else %}
-        <table class="table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Status</th>
-              <th>Travel period</th>
-              <th>Purpose</th>
-              <th>Currency</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for c in claims %}
-              <tr>
-                <td>
-                  <a href="/app/claims/{{ c.id }}">#{{ c.id|string|truncate(8, True, '') }}</a>
-                </td>
-                <td>
-                  {% if c.status.value == 'DRAFT' %}
-                    <span class="pill">{{ c.status.value }}</span>
-                  {% elif c.status.value == 'APPROVED' %}
-                    <span class="pill ok">{{ c.status.value }}</span>
-                  {% elif c.status.value == 'REJECTED' %}
-                    <span class="pill bad">{{ c.status.value }}</span>
-                  {% elif 'REVIEW' in c.status.value %}
-                    <span class="pill warn">{{ c.status.value }}</span>
-                  {% else %}
-                    <span class="pill info">{{ c.status.value }}</span>
-                  {% endif %}
-                </td>
-                <td class="muted">
-                  {% if c.travel_start_date and c.travel_end_date %}
-                    {{ c.travel_start_date }} → {{ c.travel_end_date }}
-                  {% else %}
-                    —
-                  {% endif %}
-                </td>
-                <td class="muted">{{ c.purpose or "—" }}</td>
-                <td class="muted">{{ c.home_currency }}</td>
-                <td class="text-right">
-                  {% if c.status.value in ['DRAFT', 'PROCESSING', 'NEEDS_EMPLOYEE_REVIEW'] %}
-                    <form method="post" action="/app/claims/{{ c.id }}/delete" onsubmit="return confirm('Delete this claim?');" style="display:inline;">
-                      <button class="btn btn-sm btn-danger" type="submit" title="Delete">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <polyline points="3 6 5 6 21 6"></polyline>
-                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                        </svg>
-                      </button>
-                    </form>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      {% endif %}
+  {% if claims|length == 0 %}
+    <div class="empty-inline">
+      <span class="muted">No claims yet</span>
     </div>
-  </div>
+  {% else %}
+    <div class="claims-list">
+      {% for c in claims %}
+        <a href="/app/claims/{{ c.id }}" class="claim-card">
+          <div class="claim-card-main">
+            <div class="claim-card-title">
+              {% if c.purpose %}{{ c.purpose|truncate(40) }}{% else %}Untitled claim{% endif %}
+            </div>
+            <div class="claim-card-meta">
+              {% if c.status.value == 'DRAFT' %}
+                <span class="pill">Draft</span>
+              {% elif c.status.value == 'APPROVED' %}
+                <span class="pill ok">Approved</span>
+              {% elif c.status.value == 'REJECTED' %}
+                <span class="pill bad">Rejected</span>
+              {% elif 'REVIEW' in c.status.value %}
+                <span class="pill warn">In Review</span>
+              {% else %}
+                <span class="pill info">{{ c.status.value|replace('_', ' ')|title }}</span>
+              {% endif %}
+              <span class="muted">{{ c.home_currency }}</span>
+              {% if c.travel_start_date and c.travel_end_date %}
+                <span class="muted">{{ c.travel_start_date }} → {{ c.travel_end_date }}</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="claim-card-actions">
+            {% if c.status.value in ['DRAFT', 'PROCESSING', 'NEEDS_EMPLOYEE_REVIEW'] %}
+              <form method="post" action="/app/claims/{{ c.id }}/delete" onsubmit="event.stopPropagation(); return confirm('Delete this claim?');" onclick="event.stopPropagation();">
+                <button class="btn btn-sm btn-icon" type="submit" title="Delete">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                  </svg>
+                </button>
+              </form>
+            {% endif %}
+            <svg class="claim-card-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+<style>
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.empty-inline {
+  padding: 48px 0;
+  text-align: center;
+}
+
+.claims-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.claim-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.claim-card:hover {
+  border-color: var(--border-standard);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.claim-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.claim-card-title {
+  font-weight: 500;
+  font-size: 15px;
+}
+
+.claim-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.claim-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.claim-card-chevron {
+  color: var(--text-muted);
+}
+
+.btn-icon {
+  padding: 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+
+.btn-icon:hover {
+  background: var(--bg-hover);
+  color: var(--danger);
+}
+</style>
 {% endblock %}
