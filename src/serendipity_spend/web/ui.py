@@ -641,7 +641,6 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
     for v in open_violations:
         if is_violation_blocking(v, allow_pending_exceptions=allow_pending_exceptions):
             blocked_claim_ids.add(v.claim_id)
-    blocked_claims = [c for c in claims if c.id in blocked_claim_ids][:5]
 
     stage_filters: dict[str, set[ClaimStatus]] = {
         "action": action_required_statuses,
@@ -748,7 +747,6 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
             "user": user,
             "claims": filtered_claims,
             "claims_total": len(claims),
-            "open_tasks": open_tasks[:5],
             "open_tasks_count": len(open_tasks),
             "action_required_count": action_required_count,
             "in_review_count": in_review_count,
@@ -757,7 +755,6 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
             "needs_routing_count": status_counts.get(ClaimStatus.SUBMITTED, 0),
             "open_violations_count": len(open_violations),
             "blocked_claim_count": len(blocked_claim_ids),
-            "blocked_claims": blocked_claims,
             "allow_pending_exceptions": allow_pending_exceptions,
             "dashboard_data_json": json.dumps(dashboard_data),
             "q": q or "",

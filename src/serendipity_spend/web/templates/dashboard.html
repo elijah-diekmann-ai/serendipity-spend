@@ -84,147 +84,6 @@
     {% endif %}
   </div>
 
-  <div class="dashboard-grid dashboard-grid--2 mt-3">
-    <div class="card chart-card">
-      <div class="card-header">
-        <div>
-          <div class="card-title">Claims by status</div>
-          <div class="card-subtitle">Click a slice to filter the claim list.</div>
-        </div>
-      </div>
-      <div class="card-body">
-        <div class="chart-wrap">
-          <canvas id="claims-status-chart" aria-label="Claims by status chart" role="img"></canvas>
-        </div>
-      </div>
-    </div>
-
-    <div class="card chart-card">
-      <div class="card-header">
-        <div>
-          <div class="card-title">Open tasks</div>
-          <div class="card-subtitle">Grouped by category.</div>
-        </div>
-        <a class="btn btn-sm" href="/app/tasks">View all</a>
-      </div>
-      <div class="card-body">
-        <div class="chart-wrap">
-          <canvas id="tasks-chart" aria-label="Open tasks chart" role="img"></canvas>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="card chart-card mt-3">
-    <div class="card-header">
-      <div>
-        <div class="card-title">Open policy violations</div>
-        <div class="card-subtitle">Severity mix across visible claims.</div>
-      </div>
-      <div class="pill {% if blocked_claim_count > 0 %}warn{% else %}ok{% endif %}">
-        {{ blocked_claim_count }} blocking
-      </div>
-    </div>
-    <div class="card-body">
-      <div class="chart-wrap chart-wrap--wide">
-        <canvas id="violations-chart" aria-label="Open policy violations chart" role="img"></canvas>
-      </div>
-      <div class="muted mt-1" style="font-size: 12px;">
-        {% if allow_pending_exceptions %}
-          Blocking reflects submit rules (pending exceptions don’t block).
-        {% else %}
-          Blocking reflects approval rules.
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  <div class="grid mt-3">
-    <div class="card">
-      <div class="card-header">
-        <div>
-          <div class="card-title">Next up</div>
-          <div class="card-subtitle">{{ open_tasks_count }} open tasks assigned to you.</div>
-        </div>
-        <a class="btn btn-sm" href="/app/tasks">Tasks</a>
-      </div>
-      <div class="card-body">
-        {% if open_tasks|length == 0 %}
-          <div class="empty-state">
-            <p>No open tasks.</p>
-          </div>
-        {% else %}
-          <table class="table table-compact">
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Claim</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for t in open_tasks %}
-                <tr>
-                  <td>
-                    <div style="font-weight: 500; color: var(--text-primary);">{{ t.title }}</div>
-                    {% if t.description %}
-                      <div class="muted mt-1">{{ t.description }}</div>
-                    {% endif %}
-                  </td>
-                  <td class="mono muted">
-                    <a href="/app/claims/{{ t.claim_id }}">#{{ t.claim_id|string|truncate(8, True, '') }}</a>
-                  </td>
-                  <td class="text-right">
-                    <form method="post" action="/app/tasks/{{ t.id }}/resolve">
-                      <input type="hidden" name="claim_id" value="{{ t.claim_id }}" />
-                      <button class="btn btn-sm" type="submit">Mark done</button>
-                    </form>
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        {% endif %}
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <div>
-          <div class="card-title">Policy blockers</div>
-          <div class="card-subtitle">Claims with blocking issues.</div>
-        </div>
-        <a class="btn btn-sm" href="/app/tasks">View tasks</a>
-      </div>
-      <div class="card-body">
-        {% if blocked_claims|length == 0 %}
-          <div class="empty-state">
-            <p>No blocking policy items.</p>
-          </div>
-        {% else %}
-          <div class="claims-list claims-list--compact">
-            {% for c in blocked_claims %}
-              <a href="/app/claims/{{ c.id }}" class="claim-card">
-                <div class="claim-card-main">
-                  <div class="claim-card-title">
-                    {% if c.purpose %}{{ c.purpose|truncate(42) }}{% else %}Untitled claim{% endif %}
-                  </div>
-                  <div class="claim-card-meta">
-                    <span class="pill warn">Blocking</span>
-                    <span class="muted mono">#{{ c.id|string|truncate(8, True, '') }}</span>
-                  </div>
-                </div>
-                <svg class="claim-card-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="9 18 15 12 9 6"></polyline>
-                </svg>
-              </a>
-            {% endfor %}
-          </div>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
   <div class="card mt-3">
     <div class="card-header dashboard-claims-header">
       <div>
@@ -304,6 +163,61 @@
           {% endfor %}
         </div>
       {% endif %}
+    </div>
+  </div>
+
+  <div class="dashboard-grid dashboard-grid--2 mt-3">
+    <div class="card chart-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Claims by status</div>
+          <div class="card-subtitle">Click a slice to filter the claim list.</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap">
+          <canvas id="claims-status-chart" aria-label="Claims by status chart" role="img"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="card chart-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Open tasks</div>
+          <div class="card-subtitle">Grouped by category.</div>
+        </div>
+        <a class="btn btn-sm" href="/app/tasks">View all</a>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap">
+          <canvas id="tasks-chart" aria-label="Open tasks chart" role="img"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card chart-card mt-3">
+    <div class="card-header">
+      <div>
+        <div class="card-title">Open policy violations</div>
+        <div class="card-subtitle">Severity mix across visible claims.</div>
+      </div>
+      <div class="pill {% if blocked_claim_count > 0 %}warn{% else %}ok{% endif %}">
+        {{ blocked_claim_count }} blocking
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="chart-wrap chart-wrap--wide">
+        <canvas id="violations-chart" aria-label="Open policy violations chart" role="img"></canvas>
+      </div>
+      <div class="muted mt-1" style="font-size: 12px;">
+        {% if allow_pending_exceptions %}
+          Blocking reflects submit rules (pending exceptions don’t block).
+        {% else %}
+          Blocking reflects approval rules.
+        {% endif %}
+      </div>
     </div>
   </div>
 {% endblock %}
