@@ -1,0 +1,159 @@
+<div id="expenses-section" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+  <div class="step-card">
+    <div class="step-header">
+      <span class="step-number">3</span>
+      <span class="step-title">Review expenses</span>
+      {% with oob=false %}
+        {% include "claim_detail/_items_count.html" %}
+      {% endwith %}
+    </div>
+    <div class="step-body">
+      {% if review_items|length > 0 %}
+        {% set first_review = review_items[0] %}
+        <div class="review-queue">
+          <div class="review-queue-header">
+            <span class="pill warn">{{ review_items|length }} need review</span>
+            <a
+              class="btn btn-sm btn-primary"
+              href="/app/claims/{{ claim.id }}?edit_item_id={{ first_review.id }}#edit-item"
+              hx-get="/app/claims/{{ claim.id }}/items/review/next"
+              hx-target="#drawer-content"
+              hx-swap="innerHTML"
+              data-drawer-open
+            >Review next</a>
+          </div>
+          <div class="review-queue-items">
+            {% for i in review_items[:6] %}
+              <a
+                class="review-chip"
+                href="/app/claims/{{ claim.id }}?edit_item_id={{ i.id }}#edit-item"
+                hx-get="/app/claims/{{ claim.id }}/items/{{ i.id }}/drawer"
+                hx-target="#drawer-content"
+                hx-swap="innerHTML"
+                data-drawer-open
+              >
+                <span>{{ i.vendor }}</span>
+                <span class="muted mono">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</span>
+              </a>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+
+      {% if items|length == 0 %}
+        <p class="empty-text">Upload receipts to see extracted expenses here.</p>
+      {% else %}
+        <div class="expenses-table">
+          <div class="expenses-header">
+            <span>Date</span>
+            <span>Vendor</span>
+            <span>Description</span>
+            <span class="text-right">Amount</span>
+            <span class="text-right">{{ claim.home_currency }}</span>
+            <span></span>
+          </div>
+          {% for i in items %}
+            {% set needs_review = i.id in review_item_ids %}
+            <div class="expense-row {% if needs_review %}expense-row--needs-review{% endif %}">
+              <span class="muted">{{ i.transaction_date or '—' }}</span>
+              <span>{{ i.vendor }}</span>
+              <span class="muted">{{ i.description|truncate(30) if i.description else '—' }}</span>
+              <span class="text-right mono">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</span>
+              <span class="text-right mono">{% if i.amount_home_amount is not none %}{{ '%.2f'|format(i.amount_home_amount) }}{% else %}<span class="muted">—</span>{% endif %}</span>
+              <span class="text-right">
+                {% if needs_review %}
+                  <span class="pill warn" style="margin-right:6px;">Needs review</span>
+                {% endif %}
+                <a
+                  class="btn btn-sm"
+                  href="/app/claims/{{ claim.id }}?edit_item_id={{ i.id }}#edit-item"
+                  hx-get="/app/claims/{{ claim.id }}/items/{{ i.id }}/drawer"
+                  hx-target="#drawer-content"
+                  hx-swap="innerHTML"
+                  data-drawer-open
+                >Review</a>
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <!-- Add manual item (collapsed) -->
+      <details class="mt-2" id="add-manual">
+        <summary class="muted">Add item manually</summary>
+        <form method="post" action="/app/claims/{{ claim.id }}/items/new" class="compact-form mt-1">
+          <div class="form-grid-4">
+            <div class="form-field"><label>Vendor</label><input name="vendor" placeholder="e.g. Marriott" required /></div>
+            <div class="form-field"><label>Date</label><input type="date" name="transaction_date" /></div>
+            <div class="form-field"><label>Amount</label><input name="amount_original_amount" placeholder="123.45" required /></div>
+            <div class="form-field">
+              <label>Currency</label>
+              <select name="amount_original_currency" required>
+                {% for cur in currency_options %}<option value="{{ cur }}" {% if cur == claim.home_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-field">
+              <label>Category</label>
+              <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
+            </div>
+            <div class="form-field"><label>Description</label><input name="description" placeholder="Optional notes" /></div>
+          </div>
+          <input type="hidden" name="employee_reviewed" value="on" />
+          <button class="btn btn-sm" type="submit">Add</button>
+        </form>
+      </details>
+
+      {% if edit_item %}
+        <div id="edit-item" class="edit-panel edit-panel--inline mt-2">
+          <div class="edit-panel-header">
+            <strong>Editing: {{ edit_item.vendor }}</strong>
+            <a href="/app/claims/{{ claim.id }}" class="muted">Cancel</a>
+          </div>
+          <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/update" class="compact-form">
+            <div class="form-grid-4">
+              <div class="form-field"><label>Vendor</label><input name="vendor" value="{{ edit_item.vendor }}" required /></div>
+              <div class="form-field"><label>Date</label><input type="date" name="transaction_date" value="{{ edit_item.transaction_date or '' }}" /></div>
+              <div class="form-field"><label>Amount</label><input name="amount_original_amount" value="{{ '%.2f'|format(edit_item.amount_original_amount) }}" required /></div>
+              <div class="form-field">
+                <label>Currency</label>
+                <select name="amount_original_currency" required>{% for cur in currency_options %}<option value="{{ cur }}" {% if cur == edit_item.amount_original_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}</select>
+              </div>
+            </div>
+            <div class="form-grid-2">
+              <div class="form-field">
+                <label>Category</label>
+                <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}" {% if edit_item.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+              </div>
+              <div class="form-field"><label>Description</label><input name="description" value="{{ edit_item.description or '' }}" /></div>
+            </div>
+            <div class="form-grid-4">
+              <div class="form-field"><label>Hotel nights</label><input name="hotel_nights" value="{{ edit_item.metadata_json.get('hotel_nights', '') }}" placeholder="e.g. 2" /></div>
+              <div class="form-field"><label>Attendees</label><input name="attendees" value="{{ edit_item.metadata_json.get('attendees', '') }}" placeholder="For meals >$100" /></div>
+              <div class="form-field"><label>Flight hours</label><input name="flight_duration_hours" value="{{ edit_item.metadata_json.get('flight_duration_hours', '') }}" /></div>
+              <div class="form-field">
+                <label>Cabin</label>
+                <select name="flight_cabin_class">
+                  <option value="">—</option>
+                  {% set cabin = edit_item.metadata_json.get('flight_cabin_class', '') %}
+                  <option value="economy" {% if cabin == 'economy' %}selected{% endif %}>Economy</option>
+                  <option value="premium_economy" {% if cabin == 'premium_economy' %}selected{% endif %}>Premium</option>
+                  <option value="business" {% if cabin == 'business' %}selected{% endif %}>Business</option>
+                  <option value="first" {% if cabin == 'first' %}selected{% endif %}>First</option>
+                </select>
+              </div>
+            </div>
+            <input type="hidden" name="employee_reviewed" value="on" />
+            <div class="btn-row">
+              <button class="btn btn-sm btn-primary" type="submit">Save</button>
+            </div>
+          </form>
+          <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/delete" onsubmit="return confirm('Delete?');" style="margin-top:8px;">
+            <button class="btn btn-sm" type="submit" style="color: var(--danger);">Delete</button>
+          </form>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>

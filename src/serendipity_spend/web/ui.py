@@ -26,7 +26,7 @@ from serendipity_spend.core.logging import (
 )
 from serendipity_spend.core.security import create_access_token, decode_access_token
 from serendipity_spend.core.storage import get_storage
-from serendipity_spend.modules.claims.models import ClaimStatus
+from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.claims.schemas import ClaimUpdate
 from serendipity_spend.modules.claims.service import (
     create_claim,
@@ -36,11 +36,16 @@ from serendipity_spend.modules.claims.service import (
     route_claim,
     update_claim,
 )
-from serendipity_spend.modules.documents.models import SourceFile
+from serendipity_spend.modules.documents.models import (
+    EvidenceDocument,
+    SourceFile,
+    SourceFileStatus,
+)
 from serendipity_spend.modules.documents.service import (
     create_source_files_from_upload,
     list_source_files,
 )
+from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
 from serendipity_spend.modules.expenses.service import (
     create_manual_item,
     delete_expense_item,
@@ -137,6 +142,264 @@ def _policy_task_key(task: Task) -> str | None:
 
 def _is_blocking_violation(v: PolicyViolation, *, allow_pending_exceptions: bool) -> bool:
     return is_violation_blocking(v, allow_pending_exceptions=allow_pending_exceptions)
+
+
+def _is_hx_request(request: Request) -> bool:
+    return request.headers.get("hx-request", "").lower() == "true"
+
+
+def _build_claim_detail_context(
+    *,
+    request: Request,
+    session: Session,
+    user: User,
+    claim: Claim,
+    fx_error: str | None = None,
+    fx_invalid: str | None = None,
+    fx_skipped: str | None = None,
+) -> dict:
+    docs = list_source_files(session, claim=claim, user=user)
+    items = list_items(session, claim_id=claim.id)
+
+    route_targets: list[User] = []
+    if user.role == UserRole.ADMIN:
+        route_targets = list(
+            session.scalars(
+                select(User)
+                .where(
+                    User.is_active.is_(True),
+                    User.role.in_([UserRole.APPROVER, UserRole.ADMIN]),
+                )
+                .order_by(User.email.asc())
+            )
+        )
+
+    fx_values = {
+        fx.from_currency: str(fx.rate)
+        for fx in session.scalars(
+            select(FxRate).where(
+                FxRate.claim_id == claim.id,
+                FxRate.to_currency == claim.home_currency,
+            )
+        )
+    }
+    home_cur = str(claim.home_currency or "").upper()
+    fx_currency_set: set[str] = set()
+    for item in items:
+        cur = normalize_currency(getattr(item, "amount_original_currency", None))
+        if cur and cur != home_cur:
+            fx_currency_set.add(cur)
+    for cur in fx_values.keys():
+        cur_norm = normalize_currency(cur)
+        if cur_norm and cur_norm != home_cur:
+            fx_currency_set.add(cur_norm)
+    fx_currencies = sorted(fx_currency_set)
+
+    edit_item = None
+    edit_item_id = request.query_params.get("edit_item_id")
+    if edit_item_id:
+        try:
+            edit_uuid = uuid.UUID(edit_item_id)
+        except ValueError:
+            edit_uuid = None
+        if edit_uuid:
+            edit_item = next((i for i in items if i.id == edit_uuid), None)
+
+    tasks = list_tasks(session, claim_id=claim.id)
+    violations = list(
+        session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
+    )
+
+    items_by_id = {i.id: i for i in items}
+
+    policy_tasks_by_key: dict[str, Task] = {}
+    for t in tasks:
+        key = _policy_task_key(t)
+        if not key:
+            continue
+        existing = policy_tasks_by_key.get(key)
+        if not existing or t.created_at > existing.created_at:
+            policy_tasks_by_key[key] = t
+
+    open_violations = [v for v in violations if v.status == ViolationStatus.OPEN]
+    resolved_violations = [v for v in violations if v.status == ViolationStatus.RESOLVED]
+
+    policy_exceptions = list(
+        session.scalars(select(PolicyException).where(PolicyException.claim_id == claim.id))
+    )
+    policy_exceptions_by_key = {e.dedupe_key: e for e in policy_exceptions}
+
+    allow_pending_exceptions = True
+    if (
+        user.role in {UserRole.APPROVER, UserRole.ADMIN}
+        and claim.status == ClaimStatus.NEEDS_APPROVER_REVIEW
+    ):
+        allow_pending_exceptions = False
+
+    severity_rank = {
+        PolicySeverity.FAIL: 0,
+        PolicySeverity.NEEDS_INFO: 1,
+        PolicySeverity.WARN: 2,
+        PolicySeverity.PASS: 3,
+    }
+    open_violations.sort(
+        key=lambda v: (
+            0
+            if _is_blocking_violation(v, allow_pending_exceptions=allow_pending_exceptions)
+            else 1,
+            0 if v.expense_item_id is None else 1,
+            severity_rank.get(v.severity, 99),
+            v.rule_id,
+            v.created_at,
+        )
+    )
+    resolved_violations.sort(key=lambda v: v.resolved_at or v.updated_at, reverse=True)
+
+    violation_counts: dict[str, int] = {}
+    blocking_count = 0
+    for v in open_violations:
+        key = v.severity.value
+        violation_counts[key] = violation_counts.get(key, 0) + 1
+        if _is_blocking_violation(v, allow_pending_exceptions=allow_pending_exceptions):
+            blocking_count += 1
+
+    open_other_tasks = [
+        t
+        for t in tasks
+        if t.status == TaskStatus.OPEN and not t.type.startswith("POLICY_")
+    ]
+
+    exports = list(
+        session.scalars(
+            select(ExportRun)
+            .where(ExportRun.claim_id == claim.id)
+            .order_by(ExportRun.created_at.desc())
+        )
+    )
+
+    submit_error = request.query_params.get("submit_error")
+    submit_ok = request.query_params.get("submit_ok")
+    route_error = request.query_params.get("route_error")
+    route_ok = request.query_params.get("route_ok")
+    policy_error = request.query_params.get("policy_error")
+    policy_ok = request.query_params.get("policy_ok")
+    approve_error = request.query_params.get("approve_error")
+    approve_ok = request.query_params.get("approve_ok")
+    delete_error = request.query_params.get("delete_error")
+    upload_error = request.query_params.get("upload_error")
+    fx_error_q = request.query_params.get("fx_error")
+    fx_invalid_q = request.query_params.get("fx_invalid")
+    fx_skipped_q = request.query_params.get("fx_skipped")
+    fx_error = fx_error if fx_error is not None else fx_error_q
+    fx_invalid = fx_invalid if fx_invalid is not None else fx_invalid_q
+    fx_skipped = fx_skipped if fx_skipped is not None else fx_skipped_q
+
+    poll_processing = claim.status == ClaimStatus.PROCESSING or any(
+        d.status in {SourceFileStatus.UPLOADED, SourceFileStatus.PROCESSING} for d in docs
+    )
+
+    basic_rules = {"R001", "R002"}
+    receipt_violations = [
+        v
+        for v in open_violations
+        if v.rule_id not in basic_rules and v.status == ViolationStatus.OPEN
+    ]
+    has_receipt_issues = len(receipt_violations) > 0
+
+    receipt_claim_violations: list[PolicyViolation] = []
+    receipt_item_groups: list[dict] = []
+    _grouped: dict[uuid.UUID, list[PolicyViolation]] = {}
+    _group_order: list[uuid.UUID] = []
+    for v in receipt_violations:
+        if not v.expense_item_id:
+            receipt_claim_violations.append(v)
+            continue
+        if v.expense_item_id not in _grouped:
+            _grouped[v.expense_item_id] = []
+            _group_order.append(v.expense_item_id)
+        _grouped[v.expense_item_id].append(v)
+    for item_id in _group_order:
+        receipt_item_groups.append(
+            {
+                "item_id": item_id,
+                "item": items_by_id.get(item_id),
+                "violations": _grouped[item_id],
+            }
+        )
+
+    review_item_ids: set[uuid.UUID] = set()
+    review_items: list[ExpenseItem] = []
+    for item in items:
+        item_open = [
+            v
+            for v in open_violations
+            if v.expense_item_id == item.id and v.status == ViolationStatus.OPEN
+        ]
+        needs_review = not bool((item.metadata_json or {}).get("employee_reviewed")) or bool(
+            item_open
+        )
+        if needs_review:
+            review_item_ids.add(item.id)
+            review_items.append(item)
+
+    return {
+        "request": request,
+        "user": user,
+        "claim": claim,
+        "docs": docs,
+        "items": items,
+        "items_by_id": items_by_id,
+        "edit_item": edit_item,
+        "tasks": tasks,
+        "violations": violations,
+        "policy_tasks_by_key": policy_tasks_by_key,
+        "policy_exceptions_by_key": policy_exceptions_by_key,
+        "policy_summary": {
+            "open": open_violations,
+            "resolved": resolved_violations,
+            "counts": violation_counts,
+            "open_count": len(open_violations),
+            "blocking_count": blocking_count,
+        },
+        "open_other_tasks": open_other_tasks,
+        "exports": exports,
+        "fx_values": fx_values,
+        "fx_currencies": fx_currencies,
+        "poll_processing": poll_processing,
+        "receipt_violations": receipt_violations,
+        "has_receipt_issues": has_receipt_issues,
+        "receipt_claim_violations": receipt_claim_violations,
+        "receipt_item_groups": receipt_item_groups,
+        "review_item_ids": review_item_ids,
+        "review_items": review_items,
+        "submit_error": submit_error,
+        "submit_ok": submit_ok,
+        "route_error": route_error,
+        "route_ok": route_ok,
+        "policy_error": policy_error,
+        "policy_ok": policy_ok,
+        "approve_error": approve_error,
+        "approve_ok": approve_ok,
+        "delete_error": delete_error,
+        "upload_error": upload_error,
+        "fx_error": fx_error,
+        "fx_invalid": fx_invalid,
+        "fx_skipped": fx_skipped,
+        "route_targets": route_targets,
+        "expense_categories": [
+            "transport",
+            "lodging",
+            "airfare",
+            "meals",
+            "travel_ancillary",
+            "airline_fee",
+            "other",
+        ],
+        "currency_options": [
+            home_cur,
+            *[c for c in all_currency_codes() if c != home_cur],
+        ],
+    }
 
 
 @router.get("/", response_class=RedirectResponse)
@@ -418,191 +681,149 @@ def claim_detail(
         return RedirectResponse(url="/login", status_code=303)
 
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
-    docs = list_source_files(session, claim=claim, user=user)
-    items = list_items(session, claim_id=claim.id)
-    route_targets: list[User] = []
-    if user.role == UserRole.ADMIN:
-        route_targets = list(
-            session.scalars(
-                select(User)
-                .where(
-                    User.is_active.is_(True),
-                    User.role.in_([UserRole.APPROVER, UserRole.ADMIN]),
-                )
-                .order_by(User.email.asc())
+    ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+    return templates.TemplateResponse("claim_detail.html", ctx)
+
+
+@router.get("/app/claims/{claim_id}/fragments/live", response_class=HTMLResponse)
+def claim_detail_live_fragments(
+    claim_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> HTMLResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return HTMLResponse(status_code=401, content="")
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+    ctx.update(
+        {
+            "include_header": True,
+            "include_alerts": True,
+            "include_docs_count": True,
+            "include_docs_list": True,
+            "include_expenses": True,
+            "include_policy": True,
+            "include_fx": True,
+            "include_live_poll": True,
+        }
+    )
+    return templates.TemplateResponse("claim_detail/_hx_live_response.html", ctx)
+
+
+def _build_drawer_context(
+    *,
+    request: Request,
+    session: Session,
+    user: User,
+    claim: Claim,
+    item: ExpenseItem,
+    saved: bool = False,
+    error: str | None = None,
+) -> dict:
+    base_ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+
+    evidence_rows = list(
+        session.execute(
+            select(EvidenceDocument)
+            .join(
+                ExpenseItemEvidence,
+                ExpenseItemEvidence.evidence_document_id == EvidenceDocument.id,
             )
-        )
-
-    fx_values = {
-        fx.from_currency: str(fx.rate)
-        for fx in session.scalars(
-            select(FxRate).where(
-                FxRate.claim_id == claim.id,
-                FxRate.to_currency == claim.home_currency,
-            )
-        )
-    }
-    home_cur = str(claim.home_currency or "").upper()
-    fx_currency_set: set[str] = set()
-    for item in items:
-        cur = normalize_currency(getattr(item, "amount_original_currency", None))
-        if cur and cur != home_cur:
-            fx_currency_set.add(cur)
-    for cur in fx_values.keys():
-        cur_norm = normalize_currency(cur)
-        if cur_norm and cur_norm != home_cur:
-            fx_currency_set.add(cur_norm)
-    fx_currencies = sorted(fx_currency_set)
-
-    edit_item = None
-    edit_item_id = request.query_params.get("edit_item_id")
-    if edit_item_id:
-        try:
-            edit_uuid = uuid.UUID(edit_item_id)
-        except ValueError:
-            edit_uuid = None
-        if edit_uuid:
-            edit_item = next((i for i in items if i.id == edit_uuid), None)
-    tasks = list_tasks(session, claim_id=claim.id)
-    violations = list(
-        session.scalars(select(PolicyViolation).where(PolicyViolation.claim_id == claim.id))
-    )
-
-    items_by_id = {i.id: i for i in items}
-
-    policy_tasks_by_key: dict[str, Task] = {}
-    for t in tasks:
-        key = _policy_task_key(t)
-        if not key:
-            continue
-        existing = policy_tasks_by_key.get(key)
-        if not existing or t.created_at > existing.created_at:
-            policy_tasks_by_key[key] = t
-
-    open_violations = [v for v in violations if v.status == ViolationStatus.OPEN]
-    resolved_violations = [v for v in violations if v.status == ViolationStatus.RESOLVED]
-
-    policy_exceptions = list(
-        session.scalars(select(PolicyException).where(PolicyException.claim_id == claim.id))
-    )
-    policy_exceptions_by_key = {e.dedupe_key: e for e in policy_exceptions}
-
-    allow_pending_exceptions = True
-    if (
-        user.role in {UserRole.APPROVER, UserRole.ADMIN}
-        and claim.status == ClaimStatus.NEEDS_APPROVER_REVIEW
-    ):
-        allow_pending_exceptions = False
-
-    severity_rank = {
-        PolicySeverity.FAIL: 0,
-        PolicySeverity.NEEDS_INFO: 1,
-        PolicySeverity.WARN: 2,
-        PolicySeverity.PASS: 3,
-    }
-    open_violations.sort(
-        key=lambda v: (
-            0
-            if _is_blocking_violation(v, allow_pending_exceptions=allow_pending_exceptions)
-            else 1,
-            0 if v.expense_item_id is None else 1,
-            severity_rank.get(v.severity, 99),
-            v.rule_id,
-            v.created_at,
+            .where(ExpenseItemEvidence.expense_item_id == item.id)
+            .order_by(EvidenceDocument.created_at.asc())
         )
     )
-    resolved_violations.sort(key=lambda v: v.resolved_at or v.updated_at, reverse=True)
-
-    violation_counts: dict[str, int] = {}
-    blocking_count = 0
-    for v in open_violations:
-        key = v.severity.value
-        violation_counts[key] = violation_counts.get(key, 0) + 1
-        if _is_blocking_violation(v, allow_pending_exceptions=allow_pending_exceptions):
-            blocking_count += 1
-
-    open_other_tasks = [
-        t
-        for t in tasks
-        if t.status == TaskStatus.OPEN and not t.type.startswith("POLICY_")
+    evidences = [
+        {
+            "vendor": ev.vendor,
+            "receipt_type": ev.receipt_type,
+            "page_start": ev.page_start,
+            "page_end": ev.page_end,
+            "source_file_id": ev.source_file_id,
+            "extracted_text": ev.extracted_text,
+        }
+        for (ev,) in evidence_rows
     ]
 
-    exports = list(
-        session.scalars(
-            select(ExportRun)
-            .where(ExportRun.claim_id == claim.id)
-            .order_by(ExportRun.created_at.desc())
-        )
-    )
+    open_violations: list[PolicyViolation] = list(base_ctx["policy_summary"]["open"])
+    item_violations = [
+        v
+        for v in open_violations
+        if v.expense_item_id == item.id and v.status == ViolationStatus.OPEN
+    ]
 
-    submit_error = request.query_params.get("submit_error")
-    submit_ok = request.query_params.get("submit_ok")
-    route_error = request.query_params.get("route_error")
-    route_ok = request.query_params.get("route_ok")
-    policy_error = request.query_params.get("policy_error")
-    policy_ok = request.query_params.get("policy_ok")
-    approve_error = request.query_params.get("approve_error")
-    approve_ok = request.query_params.get("approve_ok")
-    delete_error = request.query_params.get("delete_error")
-    upload_error = request.query_params.get("upload_error")
-    fx_error = request.query_params.get("fx_error")
-    fx_invalid = request.query_params.get("fx_invalid")
-    fx_skipped = request.query_params.get("fx_skipped")
+    next_review_item_id = None
+    review_items: list[ExpenseItem] = list(base_ctx["review_items"])
+    if review_items:
+        review_ids = [i.id for i in review_items]
+        if item.id in review_ids:
+            idx = review_ids.index(item.id)
+            if idx + 1 < len(review_ids):
+                next_review_item_id = review_ids[idx + 1]
+        else:
+            next_review_item_id = review_ids[0]
 
-    return templates.TemplateResponse(
-        "claim_detail.html",
+    base_ctx.update(
         {
-            "request": request,
-            "user": user,
-            "claim": claim,
-            "docs": docs,
-            "items": items,
-            "items_by_id": items_by_id,
-            "edit_item": edit_item,
-            "tasks": tasks,
-            "violations": violations,
-            "policy_tasks_by_key": policy_tasks_by_key,
-            "policy_exceptions_by_key": policy_exceptions_by_key,
-            "policy_summary": {
-                "open": open_violations,
-                "resolved": resolved_violations,
-                "counts": violation_counts,
-                "open_count": len(open_violations),
-                "blocking_count": blocking_count,
-            },
-            "open_other_tasks": open_other_tasks,
-            "exports": exports,
-            "fx_values": fx_values,
-            "fx_currencies": fx_currencies,
-            "submit_error": submit_error,
-            "submit_ok": submit_ok,
-            "route_error": route_error,
-            "route_ok": route_ok,
-            "policy_error": policy_error,
-            "policy_ok": policy_ok,
-            "approve_error": approve_error,
-            "approve_ok": approve_ok,
-            "delete_error": delete_error,
-            "upload_error": upload_error,
-            "fx_error": fx_error,
-            "fx_invalid": fx_invalid,
-            "fx_skipped": fx_skipped,
-            "route_targets": route_targets,
-            "expense_categories": [
-                "transport",
-                "lodging",
-                "airfare",
-                "meals",
-                "travel_ancillary",
-                "airline_fee",
-                "other",
-            ],
-            "currency_options": [
-                home_cur,
-                *[c for c in all_currency_codes() if c != home_cur],
-            ],
-        },
+            "item": item,
+            "evidences": evidences,
+            "item_violations": item_violations,
+            "next_review_item_id": next_review_item_id,
+            "saved": saved,
+            "error": error,
+        }
     )
+    return base_ctx
+
+
+@router.get("/app/claims/{claim_id}/items/{item_id}/drawer", response_class=HTMLResponse)
+def claim_item_drawer(
+    claim_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> HTMLResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return HTMLResponse(status_code=401, content="")
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    item = session.scalar(
+        select(ExpenseItem).where(ExpenseItem.id == item_id, ExpenseItem.claim_id == claim.id)
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Expense item not found")
+    ctx = _build_drawer_context(request=request, session=session, user=user, claim=claim, item=item)
+    return templates.TemplateResponse("claim_detail/_drawer_content.html", ctx)
+
+
+@router.get("/app/claims/{claim_id}/items/review/next", response_class=HTMLResponse)
+def claim_review_next_item(
+    claim_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(db_session),
+) -> HTMLResponse:
+    user = _get_optional_user(request, session)
+    if not user:
+        return HTMLResponse(status_code=401, content="")
+    claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+    base_ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+    review_items: list[ExpenseItem] = list(base_ctx["review_items"])
+    if not review_items:
+        return templates.TemplateResponse(
+            "claim_detail/_drawer_message.html",
+            {
+                "request": request,
+                "claim": claim,
+                "kind": "ok",
+                "title": "All set",
+                "message": "No items need review right now.",
+                "next_review_item_id": None,
+            },
+        )
+    item = review_items[0]
+    ctx = _build_drawer_context(request=request, session=session, user=user, claim=claim, item=item)
+    return templates.TemplateResponse("claim_detail/_drawer_content.html", ctx)
 
 
 @router.post("/app/claims/{claim_id}/items/new", response_class=RedirectResponse)
@@ -682,7 +903,7 @@ def update_expense_item_ui(
     attendees: str = Form(""),
     employee_reviewed: str = Form(""),
     session: Session = Depends(db_session),
-) -> RedirectResponse:
+) -> Response:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
@@ -719,9 +940,48 @@ def update_expense_item_ui(
         "amount_original_currency": amount_original_currency,
         "metadata_json": metadata,
     }
-    update_expense_item(session, claim=claim, user=user, item_id=item_id, changes=changes)
-    apply_fx_to_claim_items(session, claim_id=claim.id)
-    evaluate_claim(session, claim_id=claim.id)
+    error: str | None = None
+    saved = False
+    try:
+        update_expense_item(session, claim=claim, user=user, item_id=item_id, changes=changes)
+        apply_fx_to_claim_items(session, claim_id=claim.id)
+        evaluate_claim(session, claim_id=claim.id)
+        saved = True
+    except HTTPException as e:
+        error = e.detail if isinstance(e.detail, str) else "Could not save item."
+
+    if _is_hx_request(request):
+        claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+        item = session.scalar(
+            select(ExpenseItem).where(ExpenseItem.id == item_id, ExpenseItem.claim_id == claim.id)
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Expense item not found")
+        ctx = _build_drawer_context(
+            request=request,
+            session=session,
+            user=user,
+            claim=claim,
+            item=item,
+            saved=saved,
+            error=error,
+        )
+        ctx.update(
+            {
+                "include_header": True,
+                "include_alerts": True,
+                "include_docs_count": True,
+                "include_docs_list": False,
+                "include_expenses": True,
+                "include_policy": True,
+                "include_fx": True,
+                "include_live_poll": False,
+            }
+        )
+        return templates.TemplateResponse("claim_detail/_hx_drawer_response.html", ctx)
+
+    if error:
+        raise HTTPException(status_code=400, detail=error)
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
@@ -731,7 +991,7 @@ def delete_expense_item_ui(
     item_id: uuid.UUID,
     request: Request,
     session: Session = Depends(db_session),
-) -> RedirectResponse:
+) -> Response:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
@@ -739,6 +999,30 @@ def delete_expense_item_ui(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     delete_expense_item(session, claim=claim, user=user, item_id=item_id)
     evaluate_claim(session, claim_id=claim.id)
+
+    if _is_hx_request(request):
+        claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+        ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+        review_items: list[ExpenseItem] = list(ctx["review_items"])
+        next_review_item_id = review_items[0].id if review_items else None
+        ctx.update(
+            {
+                "title": "Item deleted",
+                "kind": "ok",
+                "message": "Deleted.",
+                "next_review_item_id": next_review_item_id,
+                "include_header": True,
+                "include_alerts": True,
+                "include_docs_count": True,
+                "include_docs_list": False,
+                "include_expenses": True,
+                "include_policy": True,
+                "include_fx": True,
+                "include_live_poll": False,
+            }
+        )
+        return templates.TemplateResponse("claim_detail/_hx_drawer_message_response.html", ctx)
+
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
@@ -828,7 +1112,7 @@ def claim_update(
     travel_end_date: str = Form(""),
     purpose: str = Form(""),
     session: Session = Depends(db_session),
-) -> RedirectResponse:
+) -> Response:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
@@ -839,8 +1123,49 @@ def claim_update(
         travel_end_date=travel_end_date or None,
         purpose=purpose or None,
     )
-    update_claim(session, claim=claim, user=user, **payload.model_dump())
-    evaluate_claim(session, claim_id=claim.id)
+    try:
+        update_claim(session, claim=claim, user=user, **payload.model_dump())
+        evaluate_claim(session, claim_id=claim.id)
+    except HTTPException as e:
+        if _is_hx_request(request):
+            message = e.detail if isinstance(e.detail, str) else "Could not save trip details."
+            ctx = _build_claim_detail_context(
+                request=request, session=session, user=user, claim=claim
+            )
+            ctx.update(
+                {
+                    "message": f'<span class="callout error">{message}</span>',
+                    "include_header": True,
+                    "include_alerts": True,
+                    "include_docs_count": False,
+                    "include_docs_list": False,
+                    "include_expenses": False,
+                    "include_policy": False,
+                    "include_fx": False,
+                    "include_live_poll": False,
+                }
+            )
+            return templates.TemplateResponse("claim_detail/_hx_message_response.html", ctx)
+        raise
+
+    if _is_hx_request(request):
+        claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+        ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+        ctx.update(
+            {
+                "message": "Saved.",
+                "include_header": True,
+                "include_alerts": True,
+                "include_docs_count": False,
+                "include_docs_list": False,
+                "include_expenses": False,
+                "include_policy": False,
+                "include_fx": False,
+                "include_live_poll": False,
+            }
+        )
+        return templates.TemplateResponse("claim_detail/_hx_message_response.html", ctx)
+
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
@@ -851,7 +1176,7 @@ async def upload_document_ui(
     upload: UploadFile | None = File(None),
     uploads: list[UploadFile] | None = File(None),
     session: Session = Depends(db_session),
-) -> RedirectResponse:
+) -> Response:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
@@ -887,6 +1212,24 @@ async def upload_document_ui(
                 request_id=request_id,
             )
             msg = f"Upload failed (request_id={request_id}). Please retry in a moment."
+            if _is_hx_request(request):
+                ctx = _build_claim_detail_context(
+                    request=request, session=session, user=user, claim=claim
+                )
+                ctx.update(
+                    {
+                        "message": f'<span class="callout error">{msg}</span>',
+                        "include_header": True,
+                        "include_alerts": True,
+                        "include_docs_count": True,
+                        "include_docs_list": True,
+                        "include_expenses": False,
+                        "include_policy": False,
+                        "include_fx": False,
+                        "include_live_poll": False,
+                    }
+                )
+                return templates.TemplateResponse("claim_detail/_hx_message_response.html", ctx)
             return RedirectResponse(
                 url=f"/app/claims/{claim.id}?upload_error={quote(msg)}", status_code=303
             )
@@ -900,6 +1243,24 @@ async def upload_document_ui(
                 claim_id=str(claim.id),
                 source_file_id=str(source.id),
             )
+    if _is_hx_request(request):
+        claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+        ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)
+        ctx.update(
+            {
+                "message": "Upload queued. Extracting…",
+                "include_header": True,
+                "include_alerts": True,
+                "include_docs_count": True,
+                "include_docs_list": True,
+                "include_expenses": False,
+                "include_policy": False,
+                "include_fx": False,
+                "include_live_poll": True,
+            }
+        )
+        return templates.TemplateResponse("claim_detail/_hx_message_response.html", ctx)
+
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
 
@@ -1057,7 +1418,7 @@ async def set_fx_ui(
     claim_id: uuid.UUID,
     request: Request,
     session: Session = Depends(db_session),
-) -> RedirectResponse:
+) -> Response:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
@@ -1102,8 +1463,35 @@ async def set_fx_ui(
 
     apply_fx_to_claim_items(session, claim_id=claim.id)
     evaluate_claim(session, claim_id=claim.id)
+    invalid_msg = None
     if invalid:
-        msg = quote("Invalid FX inputs: " + ", ".join(sorted(set(invalid))))
+        invalid_msg = "Invalid FX inputs: " + ", ".join(sorted(set(invalid)))
+
+    if _is_hx_request(request):
+        claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+        ctx = _build_claim_detail_context(
+            request=request,
+            session=session,
+            user=user,
+            claim=claim,
+            fx_invalid=invalid_msg,
+        )
+        ctx.update(
+            {
+                "include_header": True,
+                "include_alerts": True,
+                "include_docs_count": False,
+                "include_docs_list": False,
+                "include_expenses": True,
+                "include_policy": True,
+                "include_fx": False,
+                "include_live_poll": False,
+            }
+        )
+        return templates.TemplateResponse("claim_detail/_hx_fx_response.html", ctx)
+
+    if invalid_msg:
+        msg = quote(invalid_msg)
         return RedirectResponse(url=f"/app/claims/{claim.id}?fx_invalid={msg}", status_code=303)
     return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
 
@@ -1113,13 +1501,11 @@ def auto_fx_ui(
     claim_id: uuid.UUID,
     request: Request,
     session: Session = Depends(db_session),
-) -> RedirectResponse:
+) -> Response:
     user = _get_optional_user(request, session)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
-
-    from serendipity_spend.modules.expenses.models import ExpenseItem
 
     currencies = {
         str(c).upper()
@@ -1138,14 +1524,62 @@ def auto_fx_ui(
             from_currencies=currencies,
         )
         evaluate_claim(session, claim_id=claim.id)
-        if skipped:
+        skipped_msg = ",".join(sorted(skipped)) if skipped else None
+
+        if _is_hx_request(request):
+            claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+            ctx = _build_claim_detail_context(
+                request=request,
+                session=session,
+                user=user,
+                claim=claim,
+                fx_skipped=skipped_msg,
+            )
+            ctx.update(
+                {
+                    "include_header": True,
+                    "include_alerts": True,
+                    "include_docs_count": False,
+                    "include_docs_list": False,
+                    "include_expenses": True,
+                    "include_policy": True,
+                    "include_fx": False,
+                    "include_live_poll": False,
+                }
+            )
+            return templates.TemplateResponse("claim_detail/_hx_fx_response.html", ctx)
+
+        if skipped_msg:
             return RedirectResponse(
-                url=f"/app/claims/{claim.id}?fx_skipped={quote(','.join(sorted(skipped)))}",
+                url=f"/app/claims/{claim.id}?fx_skipped={quote(skipped_msg)}",
                 status_code=303,
             )
         return RedirectResponse(url=f"/app/claims/{claim.id}", status_code=303)
     except Exception:  # noqa: BLE001
         # Fall back to manual entry if the external FX service is unavailable.
+        if _is_hx_request(request):
+            claim = get_claim_for_user(session, claim_id=claim_id, user=user)
+            ctx = _build_claim_detail_context(
+                request=request,
+                session=session,
+                user=user,
+                claim=claim,
+                fx_error="1",
+            )
+            ctx.update(
+                {
+                    "include_header": True,
+                    "include_alerts": True,
+                    "include_docs_count": False,
+                    "include_docs_list": False,
+                    "include_expenses": False,
+                    "include_policy": False,
+                    "include_fx": False,
+                    "include_live_poll": False,
+                }
+            )
+            return templates.TemplateResponse("claim_detail/_hx_fx_response.html", ctx)
+
         return RedirectResponse(url=f"/app/claims/{claim.id}?fx_error=1", status_code=303)
 
 

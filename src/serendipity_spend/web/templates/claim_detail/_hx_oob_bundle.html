@@ -1,0 +1,10 @@
+{% set oob = true %}
+{% if include_header %}{% include "claim_detail/_header.html" %}{% endif %}
+{% if include_alerts %}{% include "claim_detail/_alerts.html" %}{% endif %}
+{% if include_docs_count %}{% include "claim_detail/_docs_count.html" %}{% endif %}
+{% if include_docs_list %}{% include "claim_detail/_docs_list.html" %}{% endif %}
+{% if include_expenses %}{% include "claim_detail/_expenses_section.html" %}{% endif %}
+{% if include_policy %}{% include "claim_detail/_policy_section.html" %}{% endif %}
+{% if include_fx %}{% include "claim_detail/_fx_card.html" %}{% endif %}
+{% if include_live_poll %}{% include "claim_detail/_live_poll.html" %}{% endif %}
+

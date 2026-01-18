@@ -1,0 +1,8 @@
+{% if docs|length > 0 %}
+  <span id="docs-count" class="muted" style="margin-left: auto;" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+    {{ docs|length }} file(s)
+  </span>
+{% else %}
+  <span id="docs-count" style="display:none;" {% if oob %}hx-swap-oob="outerHTML"{% endif %}></span>
+{% endif %}
+

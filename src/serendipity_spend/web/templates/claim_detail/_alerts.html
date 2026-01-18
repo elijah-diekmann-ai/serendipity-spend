@@ -1,0 +1,36 @@
+<div id="claim-alerts" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+  {% if submit_error %}
+    <div class="callout error mb-2">{{ submit_error }}</div>
+  {% elif submit_ok %}
+    <div class="callout success mb-2">Claim submitted.</div>
+  {% endif %}
+  {% if approve_error %}
+    <div class="callout error mb-2">{{ approve_error }}</div>
+  {% elif approve_ok %}
+    <div class="callout success mb-2">Decision saved.</div>
+  {% endif %}
+  {% if policy_error %}
+    <div class="callout error mb-2">{{ policy_error }}</div>
+  {% elif policy_ok %}
+    <div class="callout success mb-2">Policy update saved.</div>
+  {% endif %}
+  {% if route_error %}
+    <div class="callout error mb-2">{{ route_error }}</div>
+  {% elif route_ok %}
+    <div class="callout success mb-2">Claim routed.</div>
+  {% endif %}
+  {% if delete_error %}
+    <div class="callout error mb-2">{{ delete_error }}</div>
+  {% endif %}
+  {% if upload_error %}
+    <div class="callout error mb-2">{{ upload_error }}</div>
+  {% endif %}
+  {% if has_receipt_issues %}
+    <div class="callout {% if policy_summary.blocking_count > 0 %}error{% else %}warning{% endif %} mb-2">
+      <strong>Policy checks:</strong>
+      {{ receipt_violations|length }} item(s) need review.
+      <a href="#policy">Review</a>
+    </div>
+  {% endif %}
+</div>
+

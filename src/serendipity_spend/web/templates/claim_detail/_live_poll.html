@@ -1,0 +1,10 @@
+<div
+  id="live-poll"
+  {% if oob %}hx-swap-oob="outerHTML"{% endif %}
+  {% if poll_processing %}
+    hx-get="/app/claims/{{ claim.id }}/fragments/live"
+    hx-trigger="every 3s"
+    hx-swap="none"
+  {% endif %}
+></div>
+

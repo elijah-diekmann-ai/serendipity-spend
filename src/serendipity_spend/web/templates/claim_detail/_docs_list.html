@@ -1,0 +1,16 @@
+<div id="docs-list" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+  {% if docs|length > 0 %}
+    <div class="file-list">
+      {% for d in docs %}
+        <div class="file-item">
+          <a href="/app/documents/{{ d.id }}/download">{{ d.filename }}</a>
+          {% if d.status.value == 'PROCESSED' %}<span class="pill ok">Done</span>
+          {% elif d.status.value == 'FAILED' %}<span class="pill bad">Failed</span>
+          {% elif d.status.value == 'PROCESSING' %}<span class="pill">Processing</span>
+          {% else %}<span class="pill">{{ d.status.value }}</span>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+

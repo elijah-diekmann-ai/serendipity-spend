@@ -1,95 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-  {# Filter out basic form requirements (R001, R002) - these are obvious from the form #}
-  {% set basic_rules = ['R001', 'R002'] %}
-  {% set receipt_violations = violations|selectattr('status.value', 'equalto', 'OPEN')|rejectattr('rule_id', 'in', basic_rules)|list %}
-  {% set has_receipt_issues = receipt_violations|length > 0 %}
-
-  <!-- Header -->
-  <div class="claim-header">
-    <div>
-      <a href="/app" class="breadcrumb-link">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="15 18 9 12 15 6"></polyline>
-        </svg>
-        Claims
-      </a>
-      <h1 class="page-title mt-1">
-        {% if claim.purpose %}{{ claim.purpose|truncate(40) }}{% else %}Untitled claim{% endif %}
-      </h1>
-      <div class="claim-meta">
-        {% if claim.status.value == 'DRAFT' %}
-          <span class="pill">Draft</span>
-        {% elif claim.status.value == 'APPROVED' %}
-          <span class="pill ok">Approved</span>
-        {% elif claim.status.value == 'REJECTED' %}
-          <span class="pill bad">Rejected</span>
-        {% elif 'REVIEW' in claim.status.value %}
-          <span class="pill warn">In Review</span>
-        {% else %}
-          <span class="pill info">{{ claim.status.value }}</span>
-        {% endif %}
-        {% if claim.travel_start_date and claim.travel_end_date %}
-          <span class="muted">{{ claim.travel_start_date }} → {{ claim.travel_end_date }}</span>
-        {% endif %}
-        <span class="muted">{{ claim.home_currency }}</span>
-      </div>
-    </div>
-    <div class="btn-row">
-      <form method="post" action="/app/claims/{{ claim.id }}/export">
-        <button class="btn" type="submit">Export</button>
-      </form>
-      {% if claim.status.value in ['DRAFT', 'NEEDS_EMPLOYEE_REVIEW', 'CHANGES_REQUESTED'] %}
-        <form method="post" action="/app/claims/{{ claim.id }}/submit">
-          <button class="btn btn-primary" type="submit">
-            {% if claim.status.value == 'CHANGES_REQUESTED' %}Resubmit{% else %}Submit for review{% endif %}
-          </button>
-        </form>
-      {% endif %}
-      {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' %}
-        <form method="post" action="/app/claims/{{ claim.id }}/approve">
-          <button class="btn btn-primary" type="submit">Approve</button>
-        </form>
-        <form method="post" action="/app/claims/{{ claim.id }}/request-changes">
-          <button class="btn" type="submit">Request changes</button>
-        </form>
-      {% endif %}
-    </div>
-  </div>
-
-  {% if submit_error %}
-    <div class="callout error mb-2">{{ submit_error }}</div>
-  {% elif submit_ok %}
-    <div class="callout success mb-2">Claim submitted.</div>
-  {% endif %}
-  {% if approve_error %}
-    <div class="callout error mb-2">{{ approve_error }}</div>
-  {% elif approve_ok %}
-    <div class="callout success mb-2">Decision saved.</div>
-  {% endif %}
-  {% if policy_error %}
-    <div class="callout error mb-2">{{ policy_error }}</div>
-  {% elif policy_ok %}
-    <div class="callout success mb-2">Policy update saved.</div>
-  {% endif %}
-  {% if route_error %}
-    <div class="callout error mb-2">{{ route_error }}</div>
-  {% elif route_ok %}
-    <div class="callout success mb-2">Claim routed.</div>
-  {% endif %}
-  {% if delete_error %}
-    <div class="callout error mb-2">{{ delete_error }}</div>
-  {% endif %}
-  {% if upload_error %}
-    <div class="callout error mb-2">{{ upload_error }}</div>
-  {% endif %}
-  {% if has_receipt_issues %}
-    <div class="callout {% if policy_summary.blocking_count > 0 %}error{% else %}warning{% endif %} mb-2">
-      <strong>Policy checks:</strong>
-      {{ receipt_violations|length }} item(s) need review.
-      <a href="#policy">Review</a>
-    </div>
-  {% endif %}
+  {% set oob = false %}
+  {% include "claim_detail/_header.html" %}
+  {% include "claim_detail/_alerts.html" %}
 
   <!-- Two column layout -->
   <div class="workspace">
@@ -109,7 +22,17 @@
           {% endif %}
         </summary>
         <div class="step-body">
-          <form id="trip-form" method="post" action="/app/claims/{{ claim.id }}/update" class="compact-form">
+          <form
+            id="trip-form"
+            method="post"
+            action="/app/claims/{{ claim.id }}/update"
+            class="compact-form"
+            hx-post="/app/claims/{{ claim.id }}/update"
+            hx-trigger="keyup changed delay:800ms, change changed delay:200ms, submit"
+            hx-target="#trip-status"
+            hx-swap="innerHTML"
+            hx-indicator="#trip-saving"
+          >
             <div class="form-grid-3">
               <div class="form-field">
                 <label>Start</label>
@@ -126,29 +49,10 @@
             </div>
             <div class="btn-row">
               <button class="btn btn-sm" type="submit">Save</button>
+              <span id="trip-saving" class="muted htmx-indicator" style="font-size:12px;">Saving…</span>
               <span id="trip-status" class="muted" style="font-size:12px;"></span>
             </div>
           </form>
-          <script>
-            (function() {
-              const form = document.getElementById('trip-form');
-              const status = document.getElementById('trip-status');
-              if (!form) return;
-              let timeout;
-              form.querySelectorAll('input').forEach(input => {
-                input.addEventListener('input', () => {
-                  clearTimeout(timeout);
-                  const start = form.querySelector('[name="travel_start_date"]').value;
-                  const end = form.querySelector('[name="travel_end_date"]').value;
-                  const purpose = form.querySelector('[name="purpose"]').value.trim();
-                  if (start && end && purpose) {
-                    if (status) status.textContent = 'Auto-saving...';
-                    timeout = setTimeout(() => form.submit(), 800);
-                  }
-                });
-              });
-            })();
-          </script>
         </div>
       </details>
 
@@ -157,12 +61,22 @@
         <div class="step-header">
           <span class="step-number">2</span>
           <span class="step-title">Upload receipts</span>
-          {% if docs|length > 0 %}
-            <span class="muted" style="margin-left: auto;">{{ docs|length }} file(s)</span>
-          {% endif %}
+          {% with oob=false %}
+            {% include "claim_detail/_docs_count.html" %}
+          {% endwith %}
         </div>
         <div class="step-body">
-          <form method="post" action="/app/claims/{{ claim.id }}/upload" enctype="multipart/form-data">
+          <form
+            id="upload-form"
+            method="post"
+            action="/app/claims/{{ claim.id }}/upload"
+            enctype="multipart/form-data"
+            hx-post="/app/claims/{{ claim.id }}/upload"
+            hx-encoding="multipart/form-data"
+            hx-target="#upload-status"
+            hx-swap="innerHTML"
+            hx-indicator="#upload-indicator"
+          >
             <div id="dropzone" class="dropzone">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
@@ -176,8 +90,10 @@
             <div class="btn-row mt-1">
               <button class="btn btn-sm" type="submit">Upload</button>
               <button type="button" class="btn btn-sm" id="clear-files" style="display:none;">Clear</button>
+              <span id="upload-indicator" class="muted htmx-indicator" style="font-size:12px;">Uploading…</span>
             </div>
           </form>
+          <div id="upload-status" class="muted" style="font-size:12px; margin-top:8px;"></div>
           <script>
             (function() {
               const dz = document.getElementById('dropzone');
@@ -234,276 +150,12 @@
               }
             })();
           </script>
-          {% if docs|length > 0 %}
-            <div class="file-list">
-              {% for d in docs %}
-                <div class="file-item">
-                  <a href="/app/documents/{{ d.id }}/download">{{ d.filename }}</a>
-                  {% if d.status.value == 'PROCESSED' %}<span class="pill ok">Done</span>
-                  {% elif d.status.value == 'FAILED' %}<span class="pill bad">Failed</span>
-                  {% elif d.status.value == 'PROCESSING' %}<span class="pill">Processing</span>
-                  {% else %}<span class="pill">{{ d.status.value }}</span>{% endif %}
-                </div>
-              {% endfor %}
-            </div>
-          {% endif %}
+          {% include "claim_detail/_docs_list.html" %}
         </div>
       </div>
 
-      <!-- Step 3: Review Expenses -->
-      <div class="step-card">
-        <div class="step-header">
-          <span class="step-number">3</span>
-          <span class="step-title">Review expenses</span>
-          {% if items|length > 0 %}
-            <span class="muted" style="margin-left: auto;">{{ items|length }} item(s)</span>
-          {% endif %}
-        </div>
-        <div class="step-body">
-          {% if items|length == 0 %}
-            <p class="empty-text">Upload receipts to see extracted expenses here.</p>
-          {% else %}
-            <div class="expenses-table">
-              <div class="expenses-header">
-                <span>Date</span>
-                <span>Vendor</span>
-                <span>Description</span>
-                <span class="text-right">Amount</span>
-                <span class="text-right">{{ claim.home_currency }}</span>
-                <span></span>
-              </div>
-              {% for i in items %}
-                <div class="expense-row">
-                  <span class="muted">{{ i.transaction_date or '—' }}</span>
-                  <span>{{ i.vendor }}</span>
-                  <span class="muted">{{ i.description|truncate(30) if i.description else '—' }}</span>
-                  <span class="text-right mono">{{ i.amount_original_currency }} {{ '%.2f'|format(i.amount_original_amount) }}</span>
-                  <span class="text-right mono">{% if i.amount_home_amount is not none %}{{ '%.2f'|format(i.amount_home_amount) }}{% else %}<span class="muted">—</span>{% endif %}</span>
-                  <span class="text-right"><a href="/app/claims/{{ claim.id }}?edit_item_id={{ i.id }}#edit-item" class="link-muted">Edit</a></span>
-                </div>
-              {% endfor %}
-            </div>
-          {% endif %}
-
-          <!-- Add manual item (collapsed) -->
-          <details class="mt-2" id="add-manual">
-            <summary class="muted">Add item manually</summary>
-            <form method="post" action="/app/claims/{{ claim.id }}/items/new" class="compact-form mt-1">
-              <div class="form-grid-4">
-                <div class="form-field"><label>Vendor</label><input name="vendor" placeholder="e.g. Marriott" required /></div>
-                <div class="form-field"><label>Date</label><input type="date" name="transaction_date" /></div>
-                <div class="form-field"><label>Amount</label><input name="amount_original_amount" placeholder="123.45" required /></div>
-                <div class="form-field">
-                  <label>Currency</label>
-                  <select name="amount_original_currency" required>
-                    {% for cur in currency_options %}<option value="{{ cur }}" {% if cur == claim.home_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}
-                  </select>
-                </div>
-              </div>
-              <div class="form-grid-2">
-                <div class="form-field">
-                  <label>Category</label>
-                  <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
-                </div>
-                <div class="form-field"><label>Description</label><input name="description" placeholder="Optional notes" /></div>
-              </div>
-              <input type="hidden" name="employee_reviewed" value="on" />
-              <button class="btn btn-sm" type="submit">Add</button>
-            </form>
-          </details>
-
-          {% if edit_item %}
-            <div id="edit-item" class="edit-panel mt-2">
-              <div class="edit-panel-header">
-                <strong>Editing: {{ edit_item.vendor }}</strong>
-                <a href="/app/claims/{{ claim.id }}" class="muted">Cancel</a>
-              </div>
-              <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/update" class="compact-form">
-                <div class="form-grid-4">
-                  <div class="form-field"><label>Vendor</label><input name="vendor" value="{{ edit_item.vendor }}" required /></div>
-                  <div class="form-field"><label>Date</label><input type="date" name="transaction_date" value="{{ edit_item.transaction_date or '' }}" /></div>
-                  <div class="form-field"><label>Amount</label><input name="amount_original_amount" value="{{ '%.2f'|format(edit_item.amount_original_amount) }}" required /></div>
-                  <div class="form-field">
-                    <label>Currency</label>
-                    <select name="amount_original_currency" required>{% for cur in currency_options %}<option value="{{ cur }}" {% if cur == edit_item.amount_original_currency %}selected{% endif %}>{{ cur }}</option>{% endfor %}</select>
-                  </div>
-                </div>
-                <div class="form-grid-2">
-                  <div class="form-field">
-                    <label>Category</label>
-                    <select name="category"><option value="">—</option>{% for c in expense_categories %}<option value="{{ c }}" {% if edit_item.category == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select>
-                  </div>
-                  <div class="form-field"><label>Description</label><input name="description" value="{{ edit_item.description or '' }}" /></div>
-                </div>
-                <div class="form-grid-4">
-                  <div class="form-field"><label>Hotel nights</label><input name="hotel_nights" value="{{ edit_item.metadata_json.get('hotel_nights', '') }}" placeholder="e.g. 2" /></div>
-                  <div class="form-field"><label>Attendees</label><input name="attendees" value="{{ edit_item.metadata_json.get('attendees', '') }}" placeholder="For meals >$100" /></div>
-                  <div class="form-field"><label>Flight hours</label><input name="flight_duration_hours" value="{{ edit_item.metadata_json.get('flight_duration_hours', '') }}" /></div>
-                  <div class="form-field">
-                    <label>Cabin</label>
-                    <select name="flight_cabin_class">
-                      <option value="">—</option>
-                      {% set cabin = edit_item.metadata_json.get('flight_cabin_class', '') %}
-                      <option value="economy" {% if cabin == 'economy' %}selected{% endif %}>Economy</option>
-                      <option value="premium_economy" {% if cabin == 'premium_economy' %}selected{% endif %}>Premium</option>
-                      <option value="business" {% if cabin == 'business' %}selected{% endif %}>Business</option>
-                      <option value="first" {% if cabin == 'first' %}selected{% endif %}>First</option>
-                    </select>
-                  </div>
-                </div>
-                <input type="hidden" name="employee_reviewed" value="on" />
-                <div class="btn-row">
-                  <button class="btn btn-sm btn-primary" type="submit">Save</button>
-                  <form method="post" action="/app/claims/{{ claim.id }}/items/{{ edit_item.id }}/delete" onsubmit="return confirm('Delete?');" style="display:inline;">
-                    <button class="btn btn-sm" type="submit" style="color: var(--danger);">Delete</button>
-                  </form>
-                </div>
-              </form>
-            </div>
-          {% endif %}
-        </div>
-      </div>
-
-      <!-- Step 4: Policy checks (only shows receipt-related issues, not basic form requirements) -->
-      {% if has_receipt_issues %}
-      <details class="step-card" id="policy" open>
-        <summary class="step-header">
-          <span class="step-number">4</span>
-          <span class="step-title">Policy checks</span>
-          <span class="pill warn" style="margin-left: auto;">{{ receipt_violations|length }} to review</span>
-        </summary>
-        <div class="step-body">
-          <div class="policy-issues">
-            {% for v in receipt_violations %}
-                {% set exc = policy_exceptions_by_key.get(v.dedupe_key) %}
-                <div class="policy-issue">
-                  <div class="policy-issue-top">
-                    <div class="policy-issue-badges">
-                      {% if v.severity.value == 'FAIL' %}
-                        <span class="pill bad">FAIL</span>
-                      {% elif v.severity.value == 'WARN' %}
-                        <span class="pill warn">WARN</span>
-                      {% elif v.severity.value == 'NEEDS_INFO' %}
-                        <span class="pill info">NEEDS INFO</span>
-                      {% else %}
-                        <span class="pill">{{ v.severity.value.replace('_',' ') }}</span>
-                      {% endif %}
-                      {% if v.severity.value != 'FAIL' and (v.data_json or {}).get('submit_blocking') %}
-                        <span class="pill bad">Blocks submit</span>
-                      {% endif %}
-                      <span class="pill">{{ v.rule_id }}</span>
-                      {% if v.rule_id in ['R103','R123'] and exc %}
-                        {% if exc.status.value == 'REQUESTED' %}
-                          <span class="pill warn">Exception requested</span>
-                        {% elif exc.status.value == 'APPROVED' %}
-                          <span class="pill ok">Exception approved</span>
-                        {% elif exc.status.value == 'REJECTED' %}
-                          <span class="pill bad">Exception rejected</span>
-                        {% endif %}
-                      {% endif %}
-                    </div>
-                    <div class="policy-issue-actions">
-                      {% if v.expense_item_id %}
-                        <a href="/app/claims/{{ claim.id }}?edit_item_id={{ v.expense_item_id }}#edit-item" class="link-muted">Edit item</a>
-                      {% endif %}
-                      {% set t = policy_tasks_by_key.get(v.dedupe_key) %}
-                      {% if t and t.status.value == 'OPEN' and (user.role.value == 'ADMIN' or user.id == claim.employee_id) %}
-                        <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="display:inline;">
-                          <input type="hidden" name="claim_id" value="{{ claim.id }}" />
-                          <button class="btn btn-xs" type="submit">Mark done</button>
-                        </form>
-                      {% endif %}
-                    </div>
-                  </div>
-                  <div class="policy-issue-title">{{ v.title }}</div>
-                  <div class="muted">{{ v.message }}</div>
-                  {% if v.rule_id in ['R103','R123'] and exc %}
-                    <div class="muted mt-1"><strong>Justification:</strong> {{ exc.justification }}</div>
-                    {% if exc.decision_comment %}
-                      <div class="muted mt-1"><strong>Decision note:</strong> {{ exc.decision_comment }}</div>
-                    {% endif %}
-                  {% endif %}
-                  {% if v.rule_id in ['R103','R123'] and (user.role.value == 'ADMIN' or user.id == claim.employee_id) and claim.status.value not in ['APPROVED','REJECTED','PAID'] %}
-                    {% if not exc or exc.status.value == 'REJECTED' %}
-                      <form method="post" action="/app/claims/{{ claim.id }}/policy/exceptions/request" class="mt-1">
-                        <input type="hidden" name="violation_id" value="{{ v.id }}" />
-                        <div class="form-field">
-                          <label>Justification</label>
-                          <textarea name="justification" rows="2" required placeholder="Why is this exception needed?"></textarea>
-                        </div>
-                        <button class="btn btn-xs" type="submit">{% if exc and exc.status.value == 'REJECTED' %}Resubmit exception{% else %}Request exception{% endif %}</button>
-                      </form>
-                    {% endif %}
-                  {% endif %}
-                  {% if user.role.value in ['APPROVER','ADMIN'] and claim.status.value == 'NEEDS_APPROVER_REVIEW' and exc and exc.status.value == 'REQUESTED' %}
-                    <form method="post" action="/app/policy/exceptions/{{ exc.id }}/decide" class="mt-1">
-                      <input type="hidden" name="claim_id" value="{{ claim.id }}" />
-                      <div class="form-field">
-                        <label>Comment (optional)</label>
-                        <input name="comment" placeholder="Optional note for audit / employee" />
-                      </div>
-                      <div class="btn-row">
-                        <button class="btn btn-xs btn-primary" type="submit" name="decision" value="APPROVED">Approve exception</button>
-                        <button class="btn btn-xs" type="submit" name="decision" value="REJECTED">Reject exception</button>
-                      </div>
-                    </form>
-                  {% endif %}
-                  {% if v.expense_item_id %}
-                    {% set item = items_by_id.get(v.expense_item_id) %}
-                    <div class="policy-issue-item mono muted">
-                      {% if item %}
-                        {{ item.vendor }} · {{ item.amount_original_currency }} {{ '%.2f'|format(item.amount_original_amount) }} · {{ item.transaction_date or '—' }}
-                      {% else %}
-                        Item {{ v.expense_item_id|string|truncate(8, True, '') }}
-                      {% endif %}
-                    </div>
-                  {% endif %}
-                </div>
-              {% endfor %}
-            </div>
-
-          {% if open_other_tasks|length > 0 %}
-            <div class="policy-subtitle mt-2">Other tasks</div>
-            <div class="task-list">
-              {% for t in open_other_tasks %}
-                <div class="task-item">
-                  <div>
-                    <div>{{ t.title }}</div>
-                    {% if t.description %}<div class="muted" style="font-size:12px;">{{ t.description }}</div>{% endif %}
-                  </div>
-                  {% if user.role.value == 'ADMIN' or user.id == claim.employee_id %}
-                    <form method="post" action="/app/tasks/{{ t.id }}/resolve" style="margin:0;">
-                      <input type="hidden" name="claim_id" value="{{ claim.id }}" />
-                      <button class="btn btn-xs" type="submit">Mark done</button>
-                    </form>
-                  {% endif %}
-                </div>
-              {% endfor %}
-            </div>
-          {% endif %}
-
-          {% if policy_summary.resolved|length > 0 %}
-            <details class="mt-2">
-              <summary class="muted">Resolved policy issues ({{ policy_summary.resolved|length }})</summary>
-              <div class="policy-issues mt-1">
-                {% for v in policy_summary.resolved %}
-                  <div class="policy-issue policy-issue--resolved">
-                    <div class="policy-issue-top">
-                      <div class="policy-issue-badges">
-                        <span class="pill ok">RESOLVED</span>
-                        <span class="pill">{{ v.rule_id }}</span>
-                      </div>
-                    </div>
-                    <div class="policy-issue-title">{{ v.title }}</div>
-                    <div class="muted">{{ v.message }}</div>
-                  </div>
-                {% endfor %}
-              </div>
-            </details>
-          {% endif %}
-        </div>
-      </details>
-      {% endif %}
+      {% include "claim_detail/_expenses_section.html" %}
+      {% include "claim_detail/_policy_section.html" %}
 
     </div>
 
@@ -547,34 +199,7 @@
       {% endif %}
 
       <!-- FX Rates -->
-      <div class="sidebar-card">
-        <h3 class="sidebar-label">FX Rates</h3>
-        {% if fx_error %}
-          <div class="callout warning mb-1">Auto-fill unavailable. Enter rates manually.</div>
-        {% endif %}
-        {% if fx_invalid %}
-          <div class="callout warning mb-1">{{ fx_invalid }}</div>
-        {% endif %}
-        {% if fx_skipped %}
-          <div class="callout warning mb-1">Skipped invalid currency code(s): {{ fx_skipped }}</div>
-        {% endif %}
-        <form method="post" action="/app/claims/{{ claim.id }}/fx/auto" class="mb-1">
-          <button class="btn btn-sm" type="submit" style="width:100%;">Auto-fill rates</button>
-        </form>
-        <form method="post" action="/app/claims/{{ claim.id }}/fx" class="fx-form">
-          {% if fx_currencies|length == 0 %}
-            <div class="muted" style="font-size:12px;">No non-home currencies detected.</div>
-          {% else %}
-            {% for cur in fx_currencies %}
-              <div class="fx-row">
-                <label>{{ cur }}</label>
-                <input name="fx_rate_{{ cur }}" value="{{ fx_values.get(cur, '') }}" placeholder="e.g. 1.35" />
-              </div>
-            {% endfor %}
-          {% endif %}
-          <button class="btn btn-sm mt-1" type="submit" style="width:100%;">Save rates</button>
-        </form>
-      </div>
+      {% include "claim_detail/_fx_card.html" %}
 
       <!-- Downloads (after export) -->
       {% if exports|length > 0 %}
@@ -607,6 +232,17 @@
 
     </aside>
   </div>
+
+  <div id="expense-drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-backdrop" data-drawer-close></div>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="Expense details">
+      <div id="drawer-content">
+        <div class="muted">Select an item to review.</div>
+      </div>
+    </div>
+  </div>
+
+  {% include "claim_detail/_live_poll.html" %}
 
 <style>
 .claim-header { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; margin-bottom:32px; flex-wrap:wrap; }
@@ -650,7 +286,7 @@ details.step-card > .step-header { list-style:none; }
 .file-item a { color:var(--accent); font-weight:500; }
 
 .expenses-table { border:1px solid var(--border-subtle); border-radius:var(--radius-sm); overflow:hidden; margin-top:8px; }
-.expenses-header, .expense-row { display:grid; grid-template-columns:80px 100px 1fr 90px 70px 50px; gap:8px; padding:10px 14px; align-items:center; font-size:13px; }
+.expenses-header, .expense-row { display:grid; grid-template-columns:80px 120px 1fr 110px 90px 160px; gap:8px; padding:10px 14px; align-items:center; font-size:13px; }
 .expenses-header { background:var(--bg-elevated); font-size:10px; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; color:var(--text-muted); }
 .expense-row { border-top:1px solid var(--border-subtle); }
 .expense-row:hover { background:var(--bg-hover); }

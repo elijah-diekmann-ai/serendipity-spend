@@ -1,0 +1,8 @@
+{% if items|length > 0 %}
+  <span id="items-count" class="muted" style="margin-left: auto;" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+    {{ items|length }} item(s)
+  </span>
+{% else %}
+  <span id="items-count" style="display:none;" {% if oob %}hx-swap-oob="outerHTML"{% endif %}></span>
+{% endif %}
+
