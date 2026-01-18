@@ -637,13 +637,16 @@ input[type="file"] {
   border-left: 1px solid var(--border-standard);
   box-shadow: -16px 0 40px rgba(0, 0, 0, 0.12);
   transform: translateX(100%);
-  transition: transform 160ms ease;
+  transition: transform 160ms ease, visibility 0s 160ms;
+  visibility: hidden;
   overflow: auto;
   padding: 20px;
 }
 
 .drawer--open .drawer-panel {
   transform: translateX(0);
+  visibility: visible;
+  transition: transform 160ms ease, visibility 0s 0s;
 }
 
 body.drawer-open {
