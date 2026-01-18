@@ -32,6 +32,7 @@ from serendipity_spend.modules.extraction.ai import (
     receipt_ai_available,
 )
 from serendipity_spend.modules.extraction.models import ExtractionAICache
+from serendipity_spend.modules.extraction.parsers.agoda import parse_agoda_receipt
 from serendipity_spend.modules.extraction.parsers.baggage_fee import (
     parse_baggage_fee_payment_receipt,
 )
@@ -552,6 +553,21 @@ def _process_image(*, session, claim: Claim, source: SourceFile, body: bytes) ->
                 metadata = dict(parsed.metadata or {})
                 metadata.setdefault("transaction_date_inferred_from", "filename")
                 parsed = replace(parsed, transaction_date=inferred, metadata=metadata)
+        if is_dataclass(parsed) and str(parsed.category or "").strip().lower() in {
+            "lodging",
+            "hotel",
+        }:
+            check_in, check_out, nights = _infer_hotel_stay_dates_from_filename(
+                filename=source.filename, claim=claim
+            )
+            if check_in and check_out and check_out > check_in:
+                metadata = dict(parsed.metadata or {})
+                metadata.setdefault("hotel_check_in", check_in.isoformat())
+                metadata.setdefault("hotel_check_out", check_out.isoformat())
+                metadata.setdefault("hotel_stay_inferred_from", "filename")
+                if nights and not metadata.get("hotel_nights"):
+                    metadata["hotel_nights"] = nights
+                parsed = replace(parsed, metadata=metadata)
 
     evidence = EvidenceDocument(
         source_file_id=source.id,
@@ -1002,6 +1018,18 @@ def _is_wifionboard_receipt(text: str) -> bool:
     return bool(re.search(r"(?i)\btotal\s+paid\b|\border\b", t))
 
 
+def _is_agoda_receipt(text: str) -> bool:
+    t = (text or "").replace("\u202f", " ").replace("\xa0", " ")
+    if "agoda" not in t.lower():
+        return False
+    # The PDF receipt includes explicit structured labels.
+    return bool(
+        re.search(r"(?i)\bbooking\s+no\b", t)
+        and re.search(r"(?i)\bhotel\s+name\b", t)
+        and re.search(r"(?i)\btotal\s+charge\b", t)
+    )
+
+
 def _classify_text(text: str) -> tuple[str, str, float]:
     if _is_baggage_fee(text):
         return "Airline", "payment_receipt", 0.9
@@ -1009,6 +1037,8 @@ def _classify_text(text: str) -> tuple[str, str, float]:
         return "United Airlines", "email_receipt", 0.9
     if _is_wifionboard_receipt(text):
         return "Wi-Fi Onboard", "wifi_receipt", 0.8
+    if _is_agoda_receipt(text):
+        return "Agoda", "hotel_receipt", 0.8
     if _is_grab_start(text):
         return "Grab", "ride_receipt", 0.6
     if _is_uber_start(text):
@@ -1042,6 +1072,24 @@ def _metadata_subset(metadata: dict) -> dict:
         "extraction_method",
     )
     return {key: metadata.get(key) for key in keys if key in metadata}
+
+
+def _extract_amounts_by_currency(metadata: dict) -> dict[str, Decimal]:
+    if not isinstance(metadata, dict):
+        return {}
+    raw = metadata.get("amounts_by_currency")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Decimal] = {}
+    for cur, amt in raw.items():
+        cur_norm = normalize_currency(str(cur))
+        if not cur_norm or cur_norm == "XXX":
+            continue
+        dec = _parse_decimal_amount(str(amt))
+        if dec is None:
+            continue
+        out[cur_norm] = dec
+    return out
 
 
 def _parse_grab_with_reason(page_1: str, page_2: str):
@@ -1119,6 +1167,21 @@ def _parse_wifionboard_with_reason(text: str):
     return None, "wifionboard_parse_failed"
 
 
+def _parse_agoda_with_reason(text: str):
+    parsed = parse_agoda_receipt(text)
+    if parsed:
+        return parsed, None
+    if not _is_agoda_receipt(text):
+        return None, "missing_header"
+    if not re.search(r"(?i)\bbooking\s+no\b", text):
+        return None, "missing_booking_no"
+    if not re.search(r"(?i)\bhotel\s+name\b", text):
+        return None, "missing_hotel_name"
+    if not re.search(r"(?i)\btotal\s+charge\b", text):
+        return None, "missing_total_charge"
+    return None, "agoda_parse_failed"
+
+
 def _parse_baggage_fee_with_reason(text: str):
     parsed = parse_baggage_fee_payment_receipt(text)
     if parsed:
@@ -1162,6 +1225,8 @@ def _parse_single_text(
         return _parse_united_with_reason(text)
     if vendor == "Wi-Fi Onboard" and receipt_type == "wifi_receipt":
         return _parse_wifionboard_with_reason(text)
+    if vendor == "Agoda" and receipt_type == "hotel_receipt":
+        return _parse_agoda_with_reason(text)
     if vendor == "Airline" and receipt_type == "payment_receipt":
         return _parse_baggage_fee_with_reason(text)
     return None, "unsupported_vendor"
@@ -1274,13 +1339,36 @@ def _upsert_item_and_link_evidence(
     parsed,
     text_hash: str,
 ) -> ExpenseItem:
-    amount_home, fx_rate_to_home = _convert_to_home(
-        session=session,
-        claim_id=claim.id,
-        from_currency=parsed.currency,
-        to_currency=claim.home_currency,
-        amount=parsed.amount,
-    )
+    amounts_by_currency = _extract_amounts_by_currency(parsed.metadata or {})
+
+    amount_home = None
+    fx_rate_to_home = None
+    fx_source = "missing"
+
+    home_currency = normalize_currency(claim.home_currency) or claim.home_currency.upper()
+    if parsed.currency.upper() == home_currency:
+        amount_home = parsed.amount
+        fx_rate_to_home = Decimal("1")
+        fx_source = "identity"
+    elif home_currency in amounts_by_currency:
+        amount_home = amounts_by_currency[home_currency]
+        try:
+            if parsed.amount:
+                fx_rate_to_home = (amount_home / parsed.amount).quantize(Decimal("0.00000001"))
+                fx_source = "receipt"
+        except Exception:
+            fx_rate_to_home = None
+            fx_source = "receipt"
+    else:
+        amount_home, fx_rate_to_home = _convert_to_home(
+            session=session,
+            claim_id=claim.id,
+            from_currency=parsed.currency,
+            to_currency=home_currency,
+            amount=parsed.amount,
+        )
+        if fx_rate_to_home is not None and amount_home is not None:
+            fx_source = "claim_fx_rate"
 
     dedupe_key = _dedupe_key(parsed.vendor, parsed.vendor_reference, text_hash)
     item = session.scalar(
@@ -1300,11 +1388,11 @@ def _upsert_item_and_link_evidence(
             category=parsed.category,
             description=parsed.description,
             transaction_date=parsed.transaction_date,
-            transaction_at=None,
+            transaction_at=getattr(parsed, "transaction_at", None),
             amount_original_amount=parsed.amount,
             amount_original_currency=parsed.currency,
             amount_home_amount=amount_home,
-            amount_home_currency=claim.home_currency,
+            amount_home_currency=home_currency,
             fx_rate_to_home=fx_rate_to_home,
             metadata_json=parsed.metadata,
             dedupe_key=dedupe_key,
@@ -1352,6 +1440,11 @@ def _upsert_item_and_link_evidence(
         amount_home_amount=item.amount_home_amount,
         amount_home_currency=item.amount_home_currency,
         fx_rate_to_home=item.fx_rate_to_home,
+        fx_source=fx_source,
+        fx_pending=bool(
+            item.amount_home_amount is None
+            and item.amount_original_currency.upper() != item.amount_home_currency.upper()
+        ),
         metadata_subset=_metadata_subset(item.metadata_json or parsed.metadata or {}),
         action=action,
     )
@@ -2349,7 +2442,9 @@ def _extract_hotel_stay_dates(text: str) -> tuple[date | None, date | None]:
 
     # "Stay: 2026-01-15 - 2026-01-17"
     m = re.search(
-        r"(?i)\b(stay|dates)\b[^\n]{0,80}?\b(" + _DATE_RE.pattern + r")\b[^\n]{0,10}?"
+        r"(?i)\b(stay|dates|period|stay\s+period)\b[^\n]{0,80}?\b("
+        + _DATE_RE.pattern
+        + r")\b[^\n]{0,10}?"
         r"(?:-|–|—|to|until|through)\s*\b(" + _DATE_RE.pattern + r")\b",
         t,
     )
@@ -2806,6 +2901,73 @@ def _extract_any_date(text: str):
         ln for ln in raw.splitlines() if not ln.strip().lower().startswith("emaildate:")
     )
     return parse_candidate(without_emaildate) or parse_candidate(raw)
+
+
+def _infer_hotel_stay_dates_from_filename(
+    *,
+    filename: str,
+    claim: Claim,
+) -> tuple[date | None, date | None, int | None]:
+    name = os.path.basename(str(filename or ""))
+    stem = os.path.splitext(name)[0].replace("_", " ")
+
+    def parse_month(s: str) -> int | None:
+        ss = s.strip()
+        if not ss:
+            return None
+        for fmt in ("%b", "%B"):
+            try:
+                return datetime.strptime(ss.title(), fmt).month
+            except ValueError:
+                continue
+        return None
+
+    m = re.search(
+        r"(?i)\b([0-9]{1,2})\s*[-–]\s*([0-9]{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})(?:\s+([0-9]{4}))?\b",
+        stem,
+    )
+    if not m:
+        return None, None, None
+
+    day1 = int(m.group(1))
+    day2 = int(m.group(2))
+    month = parse_month(m.group(3))
+    year = int(m.group(4)) if m.group(4) else None
+    if not month:
+        return None, None, None
+
+    candidate_years: list[int] = []
+    if year:
+        candidate_years = [year]
+    else:
+        if claim.travel_start_date:
+            candidate_years.append(claim.travel_start_date.year)
+        if claim.travel_end_date:
+            candidate_years.append(claim.travel_end_date.year)
+        if not candidate_years:
+            candidate_years = [date.today().year]
+
+    travel_start = claim.travel_start_date
+    travel_end = claim.travel_end_date
+    travel_window_start = travel_start - timedelta(days=7) if travel_start else None
+    travel_window_end = travel_end + timedelta(days=7) if travel_end else None
+
+    for y in list(dict.fromkeys(candidate_years)):
+        try:
+            check_in = date(y, month, day1)
+            check_out = date(y, month, day2)
+        except ValueError:
+            continue
+        if check_out <= check_in:
+            continue
+        nights = (check_out - check_in).days
+        if travel_window_start and travel_window_end:
+            if travel_window_start <= check_in <= travel_window_end:
+                return check_in, check_out, nights
+        if _is_plausible_receipt_date(check_in):
+            return check_in, check_out, nights
+
+    return None, None, None
 
 
 def _infer_transaction_date_for_image(

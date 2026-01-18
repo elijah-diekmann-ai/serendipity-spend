@@ -1242,6 +1242,7 @@ async def upload_document_ui(
                 celery_task_id=async_result.id,
                 claim_id=str(claim.id),
                 source_file_id=str(source.id),
+                filename=source.filename,
             )
     if _is_hx_request(request):
         claim = get_claim_for_user(session, claim_id=claim_id, user=user)

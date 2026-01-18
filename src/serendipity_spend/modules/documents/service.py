@@ -43,6 +43,32 @@ def create_source_file(
     assert_claim_access(claim=claim, user=user)
 
     sha256 = _sha256_hex(body)
+    byte_size = len(body)
+    existing = session.scalar(
+        select(SourceFile)
+        .where(
+            SourceFile.claim_id == claim.id,
+            SourceFile.sha256 == sha256,
+            SourceFile.byte_size == byte_size,
+        )
+        .order_by(SourceFile.created_at.desc())
+    )
+    if existing:
+        log_event(
+            logger,
+            "source_file.deduped",
+            claim_id=str(claim.id),
+            source_file_id=str(existing.id),
+            storage_key=existing.storage_key,
+            filename=existing.filename,
+            content_type=existing.content_type,
+            byte_size=existing.byte_size,
+            sha256=existing.sha256,
+            duplicate_filename=filename,
+            duplicate_content_type=content_type,
+        )
+        return existing
+
     key = f"claims/{claim.id}/source/{uuid.uuid4()}-{filename}"
     stored = get_storage().put(key=key, body=body)
 

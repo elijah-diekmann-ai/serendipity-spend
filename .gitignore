@@ -9,6 +9,7 @@ __pycache__/
 *.db
 .local_storage/
 .tmp_storage_test/
+Data/
 
 # Local access notes (do not deploy)
 access.md

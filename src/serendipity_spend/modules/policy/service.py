@@ -407,6 +407,10 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
         key = issue.severity.value
         issues_by_severity[key] = issues_by_severity.get(key, 0) + 1
 
+    issues_by_rule: dict[str, int] = {}
+    for issue in issues:
+        issues_by_rule[issue.rule_id] = issues_by_rule.get(issue.rule_id, 0) + 1
+
     _sync_violations(session=session, claim_id=claim.id, issues=issues)
     _sync_tasks(session=session, claim=claim, issues=issues)
     log_event(
@@ -415,6 +419,7 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
         claim_id=str(claim.id),
         issues_total=len(issues),
         issues_by_severity=issues_by_severity,
+        issues_by_rule=issues_by_rule,
     )
 
 
@@ -422,6 +427,21 @@ def _amount_usd(*, item: ExpenseItem, claim: Claim, usd_to_home: Decimal | None)
     cur = item.amount_original_currency.upper()
     if cur == "USD":
         return item.amount_original_amount
+
+    # If the extractor captured explicit multi-currency totals, prefer a direct USD value
+    # over a derived home->USD conversion.
+    metadata = item.metadata_json or {}
+    amounts = metadata.get("amounts_by_currency")
+    if isinstance(amounts, dict):
+        for k, v in amounts.items():
+            if str(k or "").strip().upper() != "USD":
+                continue
+            try:
+                usd = Decimal(str(v)).quantize(Decimal("0.01"))
+            except Exception:
+                usd = None
+            if usd is not None:
+                return usd
 
     # If claim is in USD, we can rely on home amount.
     if claim.home_currency.upper() == "USD":
