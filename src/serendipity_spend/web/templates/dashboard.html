@@ -1,143 +1,309 @@
 {% extends "base.html" %}
+{% block head %}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+{% endblock %}
+{% block scripts %}
+  <script src="/static/dashboard.js" defer></script>
+{% endblock %}
 {% block content %}
-  <div class="dashboard-header">
-    <h1 class="page-title">Claims</h1>
-    <a class="btn btn-primary" href="/app/claims/new">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19"></line>
-        <line x1="5" y1="12" x2="19" y2="12"></line>
-      </svg>
-      New claim
-    </a>
+  <script id="dashboard-data" type="application/json">{{ dashboard_data_json|safe }}</script>
+
+  <div class="page-header">
+    <div class="page-header-content">
+      <div>
+        <h1 class="page-title">Dashboard</h1>
+        <p class="text-secondary mt-1">Claims, tasks, and policy checks at a glance.</p>
+      </div>
+      <div class="btn-row">
+        <a class="btn btn-primary" href="/app/claims/new">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          New claim
+        </a>
+        <a class="btn" href="/app/tasks">My tasks</a>
+        {% if user.role.value in ['APPROVER','ADMIN'] %}
+          <a class="btn" href="/app/inbox">Approvals inbox</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 
-  {% if claims|length == 0 %}
-    <div class="empty-inline">
-      <span class="muted">No claims yet</span>
-    </div>
-  {% else %}
-    <div class="claims-list">
-      {% for c in claims %}
-        <a href="/app/claims/{{ c.id }}" class="claim-card">
-          <div class="claim-card-main">
-            <div class="claim-card-title">
-              {% if c.purpose %}{{ c.purpose|truncate(40) }}{% else %}Untitled claim{% endif %}
-            </div>
-            <div class="claim-card-meta">
-              {% if c.status.value == 'DRAFT' %}
-                <span class="pill">Draft</span>
-              {% elif c.status.value == 'APPROVED' %}
-                <span class="pill ok">Approved</span>
-              {% elif c.status.value == 'REJECTED' %}
-                <span class="pill bad">Rejected</span>
-              {% elif 'REVIEW' in c.status.value %}
-                <span class="pill warn">In Review</span>
-              {% else %}
-                <span class="pill info">{{ c.status.value|replace('_', ' ')|title }}</span>
-              {% endif %}
-              <span class="muted">{{ c.home_currency }}</span>
-              {% if c.travel_start_date and c.travel_end_date %}
-                <span class="muted">{{ c.travel_start_date }} → {{ c.travel_end_date }}</span>
-              {% endif %}
-            </div>
-          </div>
-          <div class="claim-card-actions">
-            {% if c.status.value in ['DRAFT', 'PROCESSING', 'NEEDS_EMPLOYEE_REVIEW'] %}
-              <form method="post" action="/app/claims/{{ c.id }}/delete" onsubmit="event.stopPropagation(); return confirm('Delete this claim?');" onclick="event.stopPropagation();">
-                <button class="btn btn-sm btn-icon" type="submit" title="Delete">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3 6 5 6 21 6"></polyline>
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                  </svg>
-                </button>
-              </form>
-            {% endif %}
-            <svg class="claim-card-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="9 18 15 12 9 6"></polyline>
-            </svg>
-          </div>
+  <div class="dashboard-stats">
+    {% if user.role.value == 'EMPLOYEE' %}
+      <a class="card dashboard-card dashboard-card--violet stat-card" href="/app?stage=action">
+        <div class="stat-label">Action Required</div>
+        <div class="stat-value">{{ action_required_count }}</div>
+        <div class="stat-sub">Draft / Needs review / Changes</div>
+      </a>
+      <a class="card dashboard-card dashboard-card--blue stat-card" href="/app?stage=review">
+        <div class="stat-label">In Review</div>
+        <div class="stat-value">{{ in_review_count }}</div>
+        <div class="stat-sub">Processing / Submitted / Approver</div>
+      </a>
+      <a class="card dashboard-card dashboard-card--green stat-card" href="/app/tasks">
+        <div class="stat-label">Open Tasks</div>
+        <div class="stat-value">{{ open_tasks_count }}</div>
+        <div class="stat-sub">Items to complete</div>
+      </a>
+      <a class="card stat-card" href="/app?stage=action">
+        <div class="stat-label">Policy Blockers</div>
+        <div class="stat-value">{{ blocked_claim_count }}</div>
+        <div class="stat-sub">Blocking submit (exceptions respected)</div>
+      </a>
+    {% else %}
+      <a class="card dashboard-card dashboard-card--blue stat-card" href="/app/inbox">
+        <div class="stat-label">Needs Review</div>
+        <div class="stat-value">{{ needs_approval_count }}</div>
+        <div class="stat-sub">Claims in approver review</div>
+      </a>
+      {% if user.role.value == 'ADMIN' %}
+        <a class="card dashboard-card dashboard-card--violet stat-card" href="/app/inbox">
+          <div class="stat-label">Needs Routing</div>
+          <div class="stat-value">{{ needs_routing_count }}</div>
+          <div class="stat-sub">Submitted without approver</div>
         </a>
-      {% endfor %}
+      {% else %}
+        <a class="card dashboard-card dashboard-card--violet stat-card" href="/app">
+          <div class="stat-label">Total Claims</div>
+          <div class="stat-value">{{ claims_total }}</div>
+          <div class="stat-sub">Assigned to you</div>
+        </a>
+      {% endif %}
+      <a class="card dashboard-card dashboard-card--green stat-card" href="/app/tasks">
+        <div class="stat-label">Open Tasks</div>
+        <div class="stat-value">{{ open_tasks_count }}</div>
+        <div class="stat-sub">Assigned to you</div>
+      </a>
+      <a class="card stat-card" href="/app?stage=review">
+        <div class="stat-label">Policy Blockers</div>
+        <div class="stat-value">{{ blocked_claim_count }}</div>
+        <div class="stat-sub">Blocking approval</div>
+      </a>
+    {% endif %}
+  </div>
+
+  <div class="dashboard-grid dashboard-grid--2 mt-3">
+    <div class="card chart-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Claims by status</div>
+          <div class="card-subtitle">Click a slice to filter the claim list.</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap">
+          <canvas id="claims-status-chart" aria-label="Claims by status chart" role="img"></canvas>
+        </div>
+      </div>
     </div>
-  {% endif %}
 
-<style>
-.dashboard-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-}
+    <div class="card chart-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Open tasks</div>
+          <div class="card-subtitle">Grouped by category.</div>
+        </div>
+        <a class="btn btn-sm" href="/app/tasks">View all</a>
+      </div>
+      <div class="card-body">
+        <div class="chart-wrap">
+          <canvas id="tasks-chart" aria-label="Open tasks chart" role="img"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
 
-.empty-inline {
-  padding: 48px 0;
-  text-align: center;
-}
+  <div class="card chart-card mt-3">
+    <div class="card-header">
+      <div>
+        <div class="card-title">Open policy violations</div>
+        <div class="card-subtitle">Severity mix across visible claims.</div>
+      </div>
+      <div class="pill {% if blocked_claim_count > 0 %}warn{% else %}ok{% endif %}">
+        {{ blocked_claim_count }} blocking
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="chart-wrap chart-wrap--wide">
+        <canvas id="violations-chart" aria-label="Open policy violations chart" role="img"></canvas>
+      </div>
+      <div class="muted mt-1" style="font-size: 12px;">
+        {% if allow_pending_exceptions %}
+          Blocking reflects submit rules (pending exceptions don’t block).
+        {% else %}
+          Blocking reflects approval rules.
+        {% endif %}
+      </div>
+    </div>
+  </div>
 
-.claims-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+  <div class="grid mt-3">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Next up</div>
+          <div class="card-subtitle">{{ open_tasks_count }} open tasks assigned to you.</div>
+        </div>
+        <a class="btn btn-sm" href="/app/tasks">Tasks</a>
+      </div>
+      <div class="card-body">
+        {% if open_tasks|length == 0 %}
+          <div class="empty-state">
+            <p>No open tasks.</p>
+          </div>
+        {% else %}
+          <table class="table table-compact">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Claim</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for t in open_tasks %}
+                <tr>
+                  <td>
+                    <div style="font-weight: 500; color: var(--text-primary);">{{ t.title }}</div>
+                    {% if t.description %}
+                      <div class="muted mt-1">{{ t.description }}</div>
+                    {% endif %}
+                  </td>
+                  <td class="mono muted">
+                    <a href="/app/claims/{{ t.claim_id }}">#{{ t.claim_id|string|truncate(8, True, '') }}</a>
+                  </td>
+                  <td class="text-right">
+                    <form method="post" action="/app/tasks/{{ t.id }}/resolve">
+                      <input type="hidden" name="claim_id" value="{{ t.claim_id }}" />
+                      <button class="btn btn-sm" type="submit">Mark done</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+      </div>
+    </div>
 
-.claim-card {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius);
-  text-decoration: none;
-  color: inherit;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-}
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Policy blockers</div>
+          <div class="card-subtitle">Claims with blocking issues.</div>
+        </div>
+        <a class="btn btn-sm" href="/app/tasks">View tasks</a>
+      </div>
+      <div class="card-body">
+        {% if blocked_claims|length == 0 %}
+          <div class="empty-state">
+            <p>No blocking policy items.</p>
+          </div>
+        {% else %}
+          <div class="claims-list claims-list--compact">
+            {% for c in blocked_claims %}
+              <a href="/app/claims/{{ c.id }}" class="claim-card">
+                <div class="claim-card-main">
+                  <div class="claim-card-title">
+                    {% if c.purpose %}{{ c.purpose|truncate(42) }}{% else %}Untitled claim{% endif %}
+                  </div>
+                  <div class="claim-card-meta">
+                    <span class="pill warn">Blocking</span>
+                    <span class="muted mono">#{{ c.id|string|truncate(8, True, '') }}</span>
+                  </div>
+                </div>
+                <svg class="claim-card-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+              </a>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
 
-.claim-card:hover {
-  border-color: var(--border-standard);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-}
+  <div class="card mt-3">
+    <div class="card-header dashboard-claims-header">
+      <div>
+        <div class="card-title">Claims</div>
+        <div class="card-subtitle">
+          {{ claims_total }} total{% if q or stage or status %} • {{ claims|length }} shown{% endif %}
+        </div>
+      </div>
+      <form method="get" action="/app" class="dashboard-search">
+        <input type="text" name="q" value="{{ q }}" placeholder="Search by purpose or claim id…" />
+        {% if stage %}<input type="hidden" name="stage" value="{{ stage }}" />{% endif %}
+        {% if status %}<input type="hidden" name="status" value="{{ status }}" />{% endif %}
+        <button class="btn btn-sm" type="submit">Search</button>
+        {% if q or stage or status %}
+          <a class="btn btn-sm" href="/app">Clear</a>
+        {% endif %}
+      </form>
+    </div>
+    <div class="card-body">
+      <div class="dashboard-filters">
+        <a class="pill {% if not stage and not status %}info is-active{% endif %}" href="/app">All</a>
+        <a class="pill {% if stage == 'action' %}info is-active{% endif %}" href="/app?stage=action">Action required</a>
+        <a class="pill {% if stage == 'review' %}info is-active{% endif %}" href="/app?stage=review">In review</a>
+        <a class="pill {% if stage == 'done' %}info is-active{% endif %}" href="/app?stage=done">Done</a>
+        {% if status %}
+          <span class="pill info is-active">Status: {{ status|replace('_', ' ')|title }}</span>
+        {% endif %}
+      </div>
 
-.claim-card-main {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.claim-card-title {
-  font-weight: 500;
-  font-size: 15px;
-}
-
-.claim-card-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-
-.claim-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.claim-card-chevron {
-  color: var(--text-muted);
-}
-
-.btn-icon {
-  padding: 6px;
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: var(--radius);
-}
-
-.btn-icon:hover {
-  background: var(--bg-hover);
-  color: var(--danger);
-}
-</style>
+      {% if claims|length == 0 %}
+        <div class="empty-inline">
+          <span class="muted">No matching claims.</span>
+        </div>
+      {% else %}
+        <div class="claims-list">
+          {% for c in claims %}
+            <a href="/app/claims/{{ c.id }}" class="claim-card">
+              <div class="claim-card-main">
+                <div class="claim-card-title">
+                  {% if c.purpose %}{{ c.purpose|truncate(52) }}{% else %}Untitled claim{% endif %}
+                </div>
+                <div class="claim-card-meta">
+                  {% if c.status.value == 'DRAFT' %}
+                    <span class="pill">Draft</span>
+                  {% elif c.status.value == 'APPROVED' or c.status.value == 'PAID' %}
+                    <span class="pill ok">{{ c.status.value|replace('_', ' ')|title }}</span>
+                  {% elif c.status.value == 'REJECTED' %}
+                    <span class="pill bad">Rejected</span>
+                  {% elif 'REVIEW' in c.status.value or c.status.value == 'SUBMITTED' %}
+                    <span class="pill warn">In Review</span>
+                  {% else %}
+                    <span class="pill info">{{ c.status.value|replace('_', ' ')|title }}</span>
+                  {% endif %}
+                  <span class="muted">{{ c.home_currency }}</span>
+                  {% if c.travel_start_date and c.travel_end_date %}
+                    <span class="muted">{{ c.travel_start_date }} → {{ c.travel_end_date }}</span>
+                  {% endif %}
+                  <span class="muted mono">#{{ c.id|string|truncate(8, True, '') }}</span>
+                </div>
+              </div>
+              <div class="claim-card-actions">
+                {% if c.status.value in ['DRAFT', 'PROCESSING', 'NEEDS_EMPLOYEE_REVIEW'] %}
+                  <form method="post" action="/app/claims/{{ c.id }}/delete" onsubmit="event.stopPropagation(); return confirm('Delete this claim?');" onclick="event.stopPropagation();">
+                    <button class="btn btn-sm btn-icon" type="submit" title="Delete">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                      </svg>
+                    </button>
+                  </form>
+                {% endif %}
+                <svg class="claim-card-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+              </div>
+            </a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
 {% endblock %}

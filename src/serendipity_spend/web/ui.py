@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
+from collections import Counter
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -576,10 +578,193 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
+    stage = (request.query_params.get("stage") or "").strip().lower() or None
+    status_raw = (request.query_params.get("status") or "").strip().upper() or None
+    q = (request.query_params.get("q") or "").strip() or None
+
     claims = list_claims_for_user(session, user=user)
+    status_counts: Counter[ClaimStatus] = Counter(c.status for c in claims)
+
+    action_required_statuses = {
+        ClaimStatus.DRAFT,
+        ClaimStatus.NEEDS_EMPLOYEE_REVIEW,
+        ClaimStatus.CHANGES_REQUESTED,
+    }
+    review_statuses = {
+        ClaimStatus.PROCESSING,
+        ClaimStatus.SUBMITTED,
+        ClaimStatus.NEEDS_APPROVER_REVIEW,
+    }
+    done_statuses = {
+        ClaimStatus.APPROVED,
+        ClaimStatus.READY_FOR_PAYMENT,
+        ClaimStatus.PAID,
+        ClaimStatus.REJECTED,
+    }
+
+    action_required_count = sum(status_counts.get(s, 0) for s in action_required_statuses)
+    in_review_count = sum(status_counts.get(s, 0) for s in review_statuses)
+    done_count = sum(status_counts.get(s, 0) for s in done_statuses)
+
+    open_tasks = list(
+        session.scalars(
+            select(Task)
+            .where(Task.assigned_to_user_id == user.id, Task.status == TaskStatus.OPEN)
+            .order_by(Task.created_at.desc())
+        )
+    )
+
+    def _task_category(task: Task) -> str:
+        if task.type.startswith("POLICY_"):
+            return "Policy"
+        if task.type.startswith("EXTRACT_"):
+            return "Extraction"
+        return "Other"
+
+    task_category_counts = Counter(_task_category(t) for t in open_tasks)
+
+    claim_ids = [c.id for c in claims]
+    open_violations: list[PolicyViolation] = []
+    if claim_ids:
+        open_violations = list(
+            session.scalars(
+                select(PolicyViolation).where(
+                    PolicyViolation.claim_id.in_(claim_ids),
+                    PolicyViolation.status == ViolationStatus.OPEN,
+                )
+            )
+        )
+    violation_severity_counts = Counter(v.severity for v in open_violations)
+
+    allow_pending_exceptions = user.role == UserRole.EMPLOYEE
+    blocked_claim_ids: set[uuid.UUID] = set()
+    for v in open_violations:
+        if is_violation_blocking(v, allow_pending_exceptions=allow_pending_exceptions):
+            blocked_claim_ids.add(v.claim_id)
+    blocked_claims = [c for c in claims if c.id in blocked_claim_ids][:5]
+
+    stage_filters: dict[str, set[ClaimStatus]] = {
+        "action": action_required_statuses,
+        "review": review_statuses,
+        "done": done_statuses,
+    }
+
+    active_status: ClaimStatus | None = None
+    if status_raw:
+        try:
+            active_status = ClaimStatus(status_raw)
+        except ValueError:
+            active_status = None
+
+    filtered_claims = claims
+    if q:
+        q_lower = q.lower()
+        filtered_claims = [
+            c
+            for c in filtered_claims
+            if q_lower in str(c.id).lower() or q_lower in (c.purpose or "").lower()
+        ]
+
+    if active_status:
+        filtered_claims = [c for c in filtered_claims if c.status == active_status]
+        stage = None
+    elif stage and stage in stage_filters:
+        filtered_claims = [c for c in filtered_claims if c.status in stage_filters[stage]]
+    else:
+        stage = None
+
+    status_label = {
+        ClaimStatus.DRAFT: "Draft",
+        ClaimStatus.PROCESSING: "Processing",
+        ClaimStatus.NEEDS_EMPLOYEE_REVIEW: "Needs your review",
+        ClaimStatus.SUBMITTED: "Submitted",
+        ClaimStatus.NEEDS_APPROVER_REVIEW: "Needs approver review",
+        ClaimStatus.CHANGES_REQUESTED: "Changes requested",
+        ClaimStatus.APPROVED: "Approved",
+        ClaimStatus.READY_FOR_PAYMENT: "Ready for payment",
+        ClaimStatus.PAID: "Paid",
+        ClaimStatus.REJECTED: "Rejected",
+    }
+    status_order = [
+        ClaimStatus.DRAFT,
+        ClaimStatus.PROCESSING,
+        ClaimStatus.NEEDS_EMPLOYEE_REVIEW,
+        ClaimStatus.SUBMITTED,
+        ClaimStatus.NEEDS_APPROVER_REVIEW,
+        ClaimStatus.CHANGES_REQUESTED,
+        ClaimStatus.APPROVED,
+        ClaimStatus.READY_FOR_PAYMENT,
+        ClaimStatus.PAID,
+        ClaimStatus.REJECTED,
+    ]
+    status_chart_rows = [
+        {
+            "status": s.value,
+            "label": status_label.get(s, s.value.replace("_", " ").title()),
+            "count": status_counts.get(s, 0),
+        }
+        for s in status_order
+        if status_counts.get(s, 0) > 0
+    ]
+
+    severity_order = [
+        PolicySeverity.FAIL,
+        PolicySeverity.NEEDS_INFO,
+        PolicySeverity.WARN,
+        PolicySeverity.PASS,
+    ]
+    violation_chart_rows = [
+        {"severity": s.value, "label": s.value.replace("_", " ").title(), "count": c}
+        for s in severity_order
+        if (c := violation_severity_counts.get(s, 0)) > 0
+    ]
+
+    task_chart_rows = [
+        {"category": c, "count": task_category_counts.get(c, 0)}
+        for c in ["Policy", "Extraction", "Other"]
+        if task_category_counts.get(c, 0) > 0
+    ]
+
+    dashboard_data = {
+        "claim_status": {
+            "labels": [r["label"] for r in status_chart_rows],
+            "counts": [r["count"] for r in status_chart_rows],
+            "statuses": [r["status"] for r in status_chart_rows],
+        },
+        "task_categories": {
+            "labels": [r["category"] for r in task_chart_rows],
+            "counts": [r["count"] for r in task_chart_rows],
+        },
+        "violation_severity": {
+            "labels": [r["label"] for r in violation_chart_rows],
+            "counts": [r["count"] for r in violation_chart_rows],
+            "severities": [r["severity"] for r in violation_chart_rows],
+        },
+    }
     return templates.TemplateResponse(
         "dashboard.html",
-        {"request": request, "user": user, "claims": claims},
+        {
+            "request": request,
+            "user": user,
+            "claims": filtered_claims,
+            "claims_total": len(claims),
+            "open_tasks": open_tasks[:5],
+            "open_tasks_count": len(open_tasks),
+            "action_required_count": action_required_count,
+            "in_review_count": in_review_count,
+            "done_count": done_count,
+            "needs_approval_count": status_counts.get(ClaimStatus.NEEDS_APPROVER_REVIEW, 0),
+            "needs_routing_count": status_counts.get(ClaimStatus.SUBMITTED, 0),
+            "open_violations_count": len(open_violations),
+            "blocked_claim_count": len(blocked_claim_ids),
+            "blocked_claims": blocked_claims,
+            "allow_pending_exceptions": allow_pending_exceptions,
+            "dashboard_data_json": json.dumps(dashboard_data),
+            "q": q or "",
+            "stage": stage or "",
+            "status": active_status.value if active_status else "",
+            "status_label": status_label,
+        },
     )
 
 
