@@ -80,6 +80,9 @@
   {% if delete_error %}
     <div class="callout error mb-2">{{ delete_error }}</div>
   {% endif %}
+  {% if upload_error %}
+    <div class="callout error mb-2">{{ upload_error }}</div>
+  {% endif %}
   {% if has_receipt_issues %}
     <div class="callout {% if policy_summary.blocking_count > 0 %}error{% else %}warning{% endif %} mb-2">
       <strong>Policy checks:</strong>
