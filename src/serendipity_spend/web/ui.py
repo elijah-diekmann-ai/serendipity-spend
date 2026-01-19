@@ -46,6 +46,7 @@ from serendipity_spend.modules.documents.models import (
 from serendipity_spend.modules.documents.service import (
     create_source_files_from_upload,
     list_source_files,
+    should_enqueue_extraction,
 )
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
 from serendipity_spend.modules.expenses.service import (
@@ -1376,6 +1377,7 @@ async def upload_document_ui(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     batch = uploads or ([upload] if upload is not None else [])
     request_id = get_request_id()
+    enqueued_source_file_ids: set[uuid.UUID] = set()
     for f in batch:
         body = await f.read()
         log_event(
@@ -1425,17 +1427,43 @@ async def upload_document_ui(
             return RedirectResponse(
                 url=f"/app/claims/{claim.id}?upload_error={quote(msg)}", status_code=303
             )
-        for source in sources:
-            async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
-            log_event(
-                logger,
-                "celery.task.enqueued",
-                task_name="extract_source_file",
-                celery_task_id=async_result.id,
-                claim_id=str(claim.id),
-                source_file_id=str(source.id),
-                filename=source.filename,
-            )
+        for ingested in sources:
+            source_id = ingested.source.id
+            if source_id in enqueued_source_file_ids:
+                log_event(
+                    logger,
+                    "celery.task.not_enqueued",
+                    task_name="extract_source_file",
+                    claim_id=str(claim.id),
+                    source_file_id=str(source_id),
+                    filename=ingested.source.filename,
+                    reason="already_enqueued_in_request",
+                )
+            elif should_enqueue_extraction(ingested):
+                async_result = extract_source_file_task.delay(
+                    str(source_id), request_id=request_id
+                )
+                log_event(
+                    logger,
+                    "celery.task.enqueued",
+                    task_name="extract_source_file",
+                    celery_task_id=async_result.id,
+                    claim_id=str(claim.id),
+                    source_file_id=str(source_id),
+                    filename=ingested.source.filename,
+                )
+                enqueued_source_file_ids.add(source_id)
+            else:
+                reason = f"deduped_status_{ingested.source.status.value.lower()}"
+                log_event(
+                    logger,
+                    "celery.task.not_enqueued",
+                    task_name="extract_source_file",
+                    claim_id=str(claim.id),
+                    source_file_id=str(ingested.source.id),
+                    filename=ingested.source.filename,
+                    reason=reason,
+                )
     if _is_hx_request(request):
         claim = get_claim_for_user(session, claim_id=claim_id, user=user)
         ctx = _build_claim_detail_context(request=request, session=session, user=user, claim=claim)

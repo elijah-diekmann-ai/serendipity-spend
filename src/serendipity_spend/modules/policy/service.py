@@ -210,8 +210,9 @@ def evaluate_claim(session: Session, *, claim_id: uuid.UUID) -> None:
                     severity=PolicySeverity.NEEDS_INFO,
                     title="Confirm auto-extracted receipt details",
                     message=(
-                        "This receipt was parsed using a generic heuristic. "
-                        "Review the vendor/date/amount and mark it reviewed."
+                        "This receipt was parsed using automated extraction (generic/AI). "
+                        "Review the vendor/date/amount and mark it reviewed.\n\n"
+                        f"Extraction: {extraction_family}/{extraction_method}"
                     ),
                     data={
                         "extraction_family": extraction_family,

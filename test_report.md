@@ -141,7 +141,7 @@ Open `policy_violation` rows:
 - `R002` (FAIL): travel period missing (blocks submit)
 - `R040` (NEEDS_INFO): `expense_item_id=9f3ef069-43b2-4b80-a0dd-23480ac5d62f` (`The Lenox`) requires employee review due to `metadata_json.extraction_family="generic"` + `employee_reviewed=false` (blocks submit)
 
-## Recommended Fixes (Do Not Implement Here)
+## Recommended Fixes
 
 1. **Avoid redundant extraction tasks when a child upload is deduped**
    - Observation: `source_file.deduped` still led to `celery.task.enqueued` for the already-existing `source_file_id=e0d61e63-...`, producing a second worker run that was immediately skipped as `already_processed`.
@@ -167,4 +167,3 @@ Open `policy_violation` rows:
 4. **Clarify `R040` wording for AI-extracted receipts**
    - Observation: `R040` message says “parsed using a generic heuristic” but this receipt used `extraction_method=ai_image` with high confidence.
    - Fix direction: adjust policy message to reflect “generic/AI extraction” and optionally include `extraction_method` in the task description to aid reviewer confidence.
-

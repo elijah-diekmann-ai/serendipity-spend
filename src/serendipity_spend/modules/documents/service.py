@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import uuid
+from dataclasses import dataclass
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -15,6 +17,17 @@ from serendipity_spend.modules.documents.models import SourceFile, SourceFileSta
 from serendipity_spend.modules.identity.models import User, UserRole
 
 logger = get_logger(__name__)
+
+@dataclass(frozen=True)
+class IngestedSourceFile:
+    source: SourceFile
+    created: bool
+
+
+def should_enqueue_extraction(ingested: IngestedSourceFile) -> bool:
+    if ingested.created:
+        return True
+    return ingested.source.status in {SourceFileStatus.UPLOADED, SourceFileStatus.FAILED}
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -39,7 +52,7 @@ def create_source_file(
     filename: str,
     content_type: str | None,
     body: bytes,
-) -> SourceFile:
+) -> IngestedSourceFile:
     assert_claim_access(claim=claim, user=user)
 
     sha256 = _sha256_hex(body)
@@ -67,7 +80,7 @@ def create_source_file(
             duplicate_filename=filename,
             duplicate_content_type=content_type,
         )
-        return existing
+        return IngestedSourceFile(source=existing, created=False)
 
     key = f"claims/{claim.id}/source/{uuid.uuid4()}-{filename}"
     stored = get_storage().put(key=key, body=body)
@@ -109,7 +122,7 @@ def create_source_file(
         byte_size=source.byte_size,
         sha256=source.sha256,
     )
-    return source
+    return IngestedSourceFile(source=source, created=True)
 
 
 def list_source_files(session: Session, *, claim: Claim, user: User) -> list[SourceFile]:
@@ -135,10 +148,10 @@ def create_source_files_from_upload(
     filename: str,
     content_type: str | None,
     body: bytes,
-) -> list[SourceFile]:
+) -> list[IngestedSourceFile]:
     if _is_zip_upload(filename=filename, content_type=content_type):
         children = _unpack_zip_upload(body)
-        sources: list[SourceFile] = []
+        sources: list[IngestedSourceFile] = []
         for child in children:
             sources.extend(
                 create_source_files_from_upload(
@@ -153,16 +166,31 @@ def create_source_files_from_upload(
         return sources
 
     if _is_eml_upload(filename=filename, content_type=content_type):
-        children = _unpack_eml_upload(body)
-        if not children:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email has no attachments to ingest.",
-            )
-        sources: list[SourceFile] = []
-        for child in children:
-            sources.extend(
-                create_source_files_from_upload(
+        container_sha256 = _sha256_hex(body)
+        log_event(
+            logger,
+            "upload.unpack.start",
+            claim_id=str(claim.id),
+            container_kind="eml",
+            container_filename=filename,
+            container_content_type=content_type,
+            container_byte_size=len(body),
+            container_sha256=container_sha256,
+        )
+        children: list[dict] = []
+        sources: list[IngestedSourceFile] = []
+        child_source_files: list[dict] = []
+        deduped_children: list[dict] = []
+        try:
+            children = _unpack_eml_upload(body, upload_filename=filename)
+            if not children:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email has no attachments to ingest.",
+                )
+
+            for child in children:
+                child_sources = create_source_files_from_upload(
                     session,
                     claim=claim,
                     user=user,
@@ -170,17 +198,102 @@ def create_source_files_from_upload(
                     content_type=child.get("content_type"),
                     body=child["body"],
                 )
+                sources.extend(child_sources)
+                for ingested in child_sources:
+                    child_source_files.append(
+                        {
+                            "child_filename": child["filename"],
+                            "source_file_id": str(ingested.source.id),
+                            "source_filename": ingested.source.filename,
+                            "created": ingested.created,
+                            "status": ingested.source.status.value,
+                        }
+                    )
+                    if not ingested.created:
+                        deduped_children.append(
+                            {
+                                "child_filename": child["filename"],
+                                "source_file_id": str(ingested.source.id),
+                                "existing_filename": ingested.source.filename,
+                                "existing_status": ingested.source.status.value,
+                            }
+                        )
+
+            created_count = sum(1 for ingested in sources if ingested.created)
+            deduped_count = len(sources) - created_count
+            log_event(
+                logger,
+                "upload.unpack.finish",
+                claim_id=str(claim.id),
+                container_kind="eml",
+                container_filename=filename,
+                container_content_type=content_type,
+                container_byte_size=len(body),
+                container_sha256=container_sha256,
+                status="success",
+                child_count=len(children),
+                ingested_count=len(sources),
+                created_count=created_count,
+                deduped_count=deduped_count,
+                child_source_files=child_source_files,
+                deduped_children=deduped_children,
             )
-        return sources
+            return sources
+        except HTTPException as exc:
+            created_count = sum(1 for ingested in sources if ingested.created)
+            deduped_count = len(sources) - created_count
+            log_event(
+                logger,
+                "upload.unpack.finish",
+                claim_id=str(claim.id),
+                container_kind="eml",
+                container_filename=filename,
+                container_content_type=content_type,
+                container_byte_size=len(body),
+                container_sha256=container_sha256,
+                status="failed",
+                reason="http_error",
+                error=str(exc.detail),
+                child_count=len(children),
+                ingested_count=len(sources),
+                created_count=created_count,
+                deduped_count=deduped_count,
+                child_source_files=child_source_files or None,
+                deduped_children=deduped_children or None,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            created_count = sum(1 for ingested in sources if ingested.created)
+            deduped_count = len(sources) - created_count
+            log_event(
+                logger,
+                "upload.unpack.finish",
+                claim_id=str(claim.id),
+                container_kind="eml",
+                container_filename=filename,
+                container_content_type=content_type,
+                container_byte_size=len(body),
+                container_sha256=container_sha256,
+                status="failed",
+                reason="error",
+                error=str(exc),
+                child_count=len(children),
+                ingested_count=len(sources),
+                created_count=created_count,
+                deduped_count=deduped_count,
+                child_source_files=child_source_files or None,
+                deduped_children=deduped_children or None,
+            )
+            raise
 
     if _is_msg_upload(filename=filename, content_type=content_type):
-        children = _unpack_msg_upload(body)
+        children = _unpack_msg_upload(body, upload_filename=filename)
         if not children:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Outlook message has no body or attachments to ingest.",
             )
-        sources: list[SourceFile] = []
+        sources: list[IngestedSourceFile] = []
         for child in children:
             sources.extend(
                 create_source_files_from_upload(
@@ -270,7 +383,7 @@ def _unpack_zip_upload(body: bytes) -> list[dict]:
     return out
 
 
-def _unpack_eml_upload(body: bytes) -> list[dict]:
+def _unpack_eml_upload(body: bytes, *, upload_filename: str | None = None) -> list[dict]:
     from email import policy
     from email.parser import BytesParser
     from email.utils import parseaddr, parsedate_to_datetime
@@ -332,9 +445,16 @@ def _unpack_eml_upload(body: bytes) -> list[dict]:
             if email_date_iso:
                 combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
             combined = (combined_text + "\n").encode("utf-8", errors="replace")
+            combined_sha256 = _sha256_hex(combined)
             out.append(
                 {
-                    "filename": _sanitize_filename(_email_body_filename(subject))
+                    "filename": _sanitize_filename(
+                        _email_body_filename_for_upload(
+                            upload_filename=upload_filename,
+                            subject=subject,
+                            body_sha256=combined_sha256,
+                        )
+                    )
                     or "email-body.txt",
                     "content_type": "text/plain",
                     "body": combined,
@@ -345,7 +465,7 @@ def _unpack_eml_upload(body: bytes) -> list[dict]:
     return out
 
 
-def _unpack_msg_upload(body: bytes) -> list[dict]:
+def _unpack_msg_upload(body: bytes, *, upload_filename: str | None = None) -> list[dict]:
     from datetime import datetime
     from email.utils import parseaddr
     from tempfile import TemporaryDirectory
@@ -419,9 +539,16 @@ def _unpack_msg_upload(body: bytes) -> list[dict]:
                 if email_date_iso:
                     combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
                 combined = (combined_text + "\n").encode("utf-8", errors="replace")
+                combined_sha256 = _sha256_hex(combined)
                 out.append(
                     {
-                        "filename": _sanitize_filename(_email_body_filename(subject))
+                        "filename": _sanitize_filename(
+                            _email_body_filename_for_upload(
+                                upload_filename=upload_filename,
+                                subject=subject,
+                                body_sha256=combined_sha256,
+                            )
+                        )
                         or "email-body.txt",
                         "content_type": "text/plain",
                         "body": combined,
@@ -459,16 +586,32 @@ def _unpack_msg_upload(body: bytes) -> list[dict]:
         return out
 
 
-def _email_body_filename(subject: str) -> str:
-    subject = subject.strip()
-    if not subject:
-        return "email-body.txt"
-    safe = re.sub(r"[^A-Za-z0-9._ -]+", "", subject).strip()
-    safe = re.sub(r"\s+", " ", safe).strip()
-    safe = safe.replace(" ", "_")
-    if not safe:
-        return "email-body.txt"
-    return f"email-body-{safe[:60]}.txt"
+def _email_body_filename_for_upload(
+    *, upload_filename: str | None, subject: str, body_sha256: str
+) -> str:
+    def safe_stem(value: str) -> str:
+        v = str(value or "").strip()
+        if not v:
+            return ""
+        v = re.sub(r"[^A-Za-z0-9._ -]+", "", v).strip()
+        v = re.sub(r"\s+", " ", v).strip()
+        v = v.replace(" ", "_")
+        v = re.sub(r"_+", "_", v).strip("_")
+        return v
+
+    upload_stem = ""
+    if upload_filename:
+        name = os.path.splitext(_sanitize_filename(upload_filename))[0]
+        upload_stem = safe_stem(name)
+
+    subject_stem = safe_stem(subject)
+    stem = upload_stem or subject_stem or "email-body"
+    stem = stem[:60]
+
+    suffix = str(body_sha256 or "")[:8]
+    if suffix:
+        return f"email-body-{stem}-{suffix}.txt"
+    return f"email-body-{stem}.txt"
 
 
 def _extract_email_body_text(msg) -> str:

@@ -16,6 +16,7 @@ from serendipity_spend.modules.documents.service import (
     create_source_file,
     create_source_files_from_upload,
     list_source_files,
+    should_enqueue_extraction,
 )
 from serendipity_spend.modules.identity.models import User
 from serendipity_spend.worker.tasks import extract_source_file_task
@@ -50,17 +51,31 @@ async def upload_document(
         content_type=upload.content_type,
         body=body,
     )
-    async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
-    log_event(
-        logger,
-        "celery.task.enqueued",
-        task_name="extract_source_file",
-        celery_task_id=async_result.id,
-        claim_id=str(claim.id),
-        source_file_id=str(source.id),
-        filename=source.filename,
-    )
-    return SourceFileOut.model_validate(source, from_attributes=True)
+    if should_enqueue_extraction(source):
+        async_result = extract_source_file_task.delay(
+            str(source.source.id), request_id=request_id
+        )
+        log_event(
+            logger,
+            "celery.task.enqueued",
+            task_name="extract_source_file",
+            celery_task_id=async_result.id,
+            claim_id=str(claim.id),
+            source_file_id=str(source.source.id),
+            filename=source.source.filename,
+        )
+    else:
+        reason = f"deduped_status_{source.source.status.value.lower()}"
+        log_event(
+            logger,
+            "celery.task.not_enqueued",
+            task_name="extract_source_file",
+            claim_id=str(claim.id),
+            source_file_id=str(source.source.id),
+            filename=source.source.filename,
+            reason=reason,
+        )
+    return SourceFileOut.model_validate(source.source, from_attributes=True)
 
 
 @router.post("/claims/{claim_id}/documents/batch", response_model=list[SourceFileOut])
@@ -73,6 +88,7 @@ async def upload_documents_batch(
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     out: list[SourceFileOut] = []
     request_id = get_request_id()
+    enqueued_source_file_ids: set[uuid.UUID] = set()
     for upload in uploads:
         body = await upload.read()
         log_event(
@@ -92,17 +108,43 @@ async def upload_documents_batch(
             body=body,
         )
         for source in sources:
-            async_result = extract_source_file_task.delay(str(source.id), request_id=request_id)
-            log_event(
-                logger,
-                "celery.task.enqueued",
-                task_name="extract_source_file",
-                celery_task_id=async_result.id,
-                claim_id=str(claim.id),
-                source_file_id=str(source.id),
-                filename=source.filename,
-            )
-            out.append(SourceFileOut.model_validate(source, from_attributes=True))
+            source_id = source.source.id
+            if source_id in enqueued_source_file_ids:
+                log_event(
+                    logger,
+                    "celery.task.not_enqueued",
+                    task_name="extract_source_file",
+                    claim_id=str(claim.id),
+                    source_file_id=str(source_id),
+                    filename=source.source.filename,
+                    reason="already_enqueued_in_request",
+                )
+            elif should_enqueue_extraction(source):
+                async_result = extract_source_file_task.delay(
+                    str(source_id), request_id=request_id
+                )
+                log_event(
+                    logger,
+                    "celery.task.enqueued",
+                    task_name="extract_source_file",
+                    celery_task_id=async_result.id,
+                    claim_id=str(claim.id),
+                    source_file_id=str(source_id),
+                    filename=source.source.filename,
+                )
+                enqueued_source_file_ids.add(source_id)
+            else:
+                reason = f"deduped_status_{source.source.status.value.lower()}"
+                log_event(
+                    logger,
+                    "celery.task.not_enqueued",
+                    task_name="extract_source_file",
+                    claim_id=str(claim.id),
+                    source_file_id=str(source.source.id),
+                    filename=source.source.filename,
+                    reason=reason,
+                )
+            out.append(SourceFileOut.model_validate(source.source, from_attributes=True))
     return out
 
 
