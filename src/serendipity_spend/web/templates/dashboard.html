@@ -93,7 +93,7 @@
         </div>
       </div>
       <form method="get" action="/app" class="dashboard-search">
-        <input type="text" name="q" value="{{ q }}" placeholder="Search by purpose or claim id…" />
+        <input type="text" name="q" value="{{ q }}" placeholder="Search by name, purpose, or claim id…" />
         {% if stage %}<input type="hidden" name="stage" value="{{ stage }}" />{% endif %}
         {% if status %}<input type="hidden" name="status" value="{{ status }}" />{% endif %}
         <button class="btn btn-sm" type="submit">Search</button>
@@ -123,7 +123,7 @@
             <a href="/app/claims/{{ c.id }}" class="claim-card">
               <div class="claim-card-main">
                 <div class="claim-card-title">
-                  {% if c.purpose %}{{ c.purpose|truncate(52) }}{% else %}Untitled claim{% endif %}
+                  {% if c.name %}{{ c.name|truncate(52) }}{% elif c.purpose %}{{ c.purpose|truncate(52) }}{% else %}Untitled claim{% endif %}
                 </div>
                 <div class="claim-card-meta">
                   {% if c.status.value == 'DRAFT' %}

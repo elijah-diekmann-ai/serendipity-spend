@@ -33,7 +33,7 @@
             hx-swap="innerHTML"
             hx-indicator="#trip-saving"
           >
-            <div class="form-grid-3">
+            <div class="form-grid-2">
               <div class="form-field">
                 <label>Start</label>
                 <input type="date" name="travel_start_date" value="{{ claim.travel_start_date or '' }}" />
@@ -41,6 +41,12 @@
               <div class="form-field">
                 <label>End</label>
                 <input type="date" name="travel_end_date" value="{{ claim.travel_end_date or '' }}" />
+              </div>
+            </div>
+            <div class="form-grid-2 mt-1">
+              <div class="form-field">
+                <label>Claim name</label>
+                <input name="name" value="{{ claim.name or '' }}" placeholder="e.g. Toronto trip — Jan 2026" />
               </div>
               <div class="form-field">
                 <label>Purpose</label>

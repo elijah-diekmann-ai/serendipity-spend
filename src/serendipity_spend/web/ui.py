@@ -662,7 +662,9 @@ def dashboard(request: Request, session: Session = Depends(db_session)) -> HTMLR
         filtered_claims = [
             c
             for c in filtered_claims
-            if q_lower in str(c.id).lower() or q_lower in (c.purpose or "").lower()
+            if q_lower in str(c.id).lower()
+            or q_lower in (c.name or "").lower()
+            or q_lower in (c.purpose or "").lower()
         ]
 
     if active_status:
@@ -1301,6 +1303,7 @@ def delete_claim_ui(
 def claim_update(
     claim_id: uuid.UUID,
     request: Request,
+    name: str = Form(""),
     travel_start_date: str = Form(""),
     travel_end_date: str = Form(""),
     purpose: str = Form(""),
@@ -1312,6 +1315,7 @@ def claim_update(
 
     claim = get_claim_for_user(session, claim_id=claim_id, user=user)
     payload = ClaimUpdate(
+        name=name or None,
         travel_start_date=travel_start_date or None,
         travel_end_date=travel_end_date or None,
         purpose=purpose or None,

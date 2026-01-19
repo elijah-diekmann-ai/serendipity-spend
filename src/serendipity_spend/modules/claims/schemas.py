@@ -14,6 +14,7 @@ class ClaimCreate(BaseModel):
 
 class ClaimUpdate(BaseModel):
     home_currency: str | None = None
+    name: str | None = None
     travel_start_date: date | None = None
     travel_end_date: date | None = None
     purpose: str | None = None
@@ -24,6 +25,7 @@ class ClaimOut(BaseModel):
     employee_id: uuid.UUID
     approver_id: uuid.UUID | None
     home_currency: str
+    name: str | None
     travel_start_date: date | None
     travel_end_date: date | None
     purpose: str | None

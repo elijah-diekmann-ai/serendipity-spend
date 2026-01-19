@@ -34,6 +34,7 @@ class Claim(UUIDPrimaryKey, Timestamped, Base):
     )
 
     home_currency: Mapped[str] = mapped_column(String(3), default="SGD")
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
     travel_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     travel_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
