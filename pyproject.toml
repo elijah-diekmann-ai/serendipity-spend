@@ -29,6 +29,7 @@ dependencies = [
   "redis>=5.0.8",
   "sqlalchemy>=2.0.32",
   "uvicorn[standard]>=0.30.6",
+  "weasyprint>=61.0",
 ]
 
 [project.optional-dependencies]

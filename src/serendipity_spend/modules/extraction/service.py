@@ -19,6 +19,7 @@ from serendipity_spend.core.currencies import normalize_currency
 from serendipity_spend.core.db import SessionLocal
 from serendipity_spend.core.logging import get_logger, log_event, log_exception, monotonic_ms
 from serendipity_spend.core.storage import get_storage
+from serendipity_spend.core.text import decode_text_bytes
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.documents.models import (
     EvidenceDocument,
@@ -789,25 +790,7 @@ def _process_text(*, session, claim: Claim, source: SourceFile, body: bytes) -> 
 
 
 def _decode_text_bytes(*, body: bytes, filename: str, content_type: str | None) -> str:
-    ctype = (content_type or "").lower()
-    is_html = ctype.startswith("text/html") or filename.lower().endswith((".html", ".htm"))
-    try:
-        text = body.decode("utf-8", errors="replace")
-    except Exception:
-        text = body.decode("latin-1", errors="replace")
-    if is_html or _looks_like_html(text):
-        text = _html_to_text(text)
-    return text
-
-
-def _looks_like_html(text: str) -> bool:
-    t = (text or "").lstrip().lower()
-    if not t:
-        return False
-    if t.startswith("<!doctype html") or t.startswith("<html"):
-        return True
-    head = t[:2000]
-    return bool(re.search(r"<(html|body|div|p|br|table|tr|td|span)(\s|>)", head, re.I))
+    return decode_text_bytes(body=body, filename=filename, content_type=content_type)
 
 
 def _detect_file_kind(*, filename: str, content_type: str | None, body: bytes) -> str:
@@ -885,19 +868,6 @@ def _looks_like_text_bytes(body: bytes) -> bool:
             continue
         nontext += 1
     return (nontext / max(1, len(stripped))) <= 0.02
-
-
-def _html_to_text(html: str) -> str:
-    from html import unescape
-
-    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", html)
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</p\s*>", "\n\n", html)
-    html = re.sub(r"(?i)</div\s*>", "\n", html)
-    html = re.sub(r"(?s)<[^>]+>", "", html)
-    html = unescape(html)
-    lines = [re.sub(r"\s+", " ", ln).strip() for ln in html.splitlines()]
-    return "\n".join([ln for ln in lines if ln])
 
 
 def _extract_pdf_pages(body: bytes) -> tuple[list[str], int]:

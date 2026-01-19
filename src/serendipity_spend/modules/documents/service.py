@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import uuid
+from base64 import b64encode
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from serendipity_spend.core.logging import get_logger, log_event
 from serendipity_spend.core.storage import get_storage
+from serendipity_spend.core.text import html_to_text, is_url_heavy_text
 from serendipity_spend.modules.claims.models import Claim, ClaimStatus
 from serendipity_spend.modules.documents.models import SourceFile, SourceFileStatus
 from serendipity_spend.modules.identity.models import User, UserRole
@@ -386,7 +388,6 @@ def _unpack_zip_upload(body: bytes) -> list[dict]:
 def _unpack_eml_upload(body: bytes, *, upload_filename: str | None = None) -> list[dict]:
     from email import policy
     from email.parser import BytesParser
-    from email.utils import parseaddr, parsedate_to_datetime
 
     msg = BytesParser(policy=policy.default).parsebytes(body)
 
@@ -408,56 +409,30 @@ def _unpack_eml_upload(body: bytes, *, upload_filename: str | None = None) -> li
             }
         )
 
-    body_text = _extract_email_body_text(msg)
-    if body_text and body_text.strip():
+    body_choice = _select_email_body(msg)
+    if body_choice is not None:
+        body_content_type, body_bytes, body_text_for_receipt_check = body_choice
         include_body = True
-        if attachments and (not _email_body_looks_like_receipt(body_text)):
+        if attachments and (not _email_body_looks_like_receipt(body_text_for_receipt_check)):
             include_body = False
         if include_body:
             subject = str(msg.get("subject") or "").strip()
-            from_header = str(msg.get("from") or "").strip()
-            from_name, from_addr = parseaddr(from_header)
-            from_name = str(from_name or "").strip()
-            sender_hint = from_name
-            if not sender_hint and "@" in from_addr:
-                sender_hint = from_addr.split("@", 1)[-1].strip()
-
-            email_date_iso = None
-            date_header = str(msg.get("date") or "").strip()
-            if date_header:
-                try:
-                    email_date_iso = parsedate_to_datetime(date_header).date().isoformat()
-                except Exception:
-                    email_date_iso = None
-
-            header_lines: list[str] = []
-            if sender_hint:
-                header_lines.append(sender_hint)
-            if subject:
-                header_lines.append(f"Subject: {subject}")
-            if from_header:
-                header_lines.append(f"From: {from_header}")
-            to_header = str(msg.get("to") or "").strip()
-            if to_header:
-                header_lines.append(f"To: {to_header}")
-
-            combined_text = "\n".join(header_lines) + "\n\n" + body_text.strip()
-            if email_date_iso:
-                combined_text = combined_text + f"\n\nEmailDate: {email_date_iso}"
-            combined = (combined_text + "\n").encode("utf-8", errors="replace")
-            combined_sha256 = _sha256_hex(combined)
+            fallback_filename = (
+                "email-body.html" if body_content_type == "text/html" else "email-body.txt"
+            )
             out.append(
                 {
                     "filename": _sanitize_filename(
                         _email_body_filename_for_upload(
                             upload_filename=upload_filename,
                             subject=subject,
-                            body_sha256=combined_sha256,
+                            body_sha256=_sha256_hex(body_bytes),
+                            extension=("html" if body_content_type == "text/html" else "txt"),
                         )
                     )
-                    or "email-body.txt",
-                    "content_type": "text/plain",
-                    "body": combined,
+                    or fallback_filename,
+                    "content_type": body_content_type,
+                    "body": body_bytes,
                 }
             )
 
@@ -587,7 +562,7 @@ def _unpack_msg_upload(body: bytes, *, upload_filename: str | None = None) -> li
 
 
 def _email_body_filename_for_upload(
-    *, upload_filename: str | None, subject: str, body_sha256: str
+    *, upload_filename: str | None, subject: str, body_sha256: str, extension: str = "txt"
 ) -> str:
     def safe_stem(value: str) -> str:
         v = str(value or "").strip()
@@ -610,11 +585,33 @@ def _email_body_filename_for_upload(
 
     suffix = str(body_sha256 or "")[:8]
     if suffix:
-        return f"email-body-{stem}-{suffix}.txt"
-    return f"email-body-{stem}.txt"
+        return f"email-body-{stem}-{suffix}.{extension}"
+    return f"email-body-{stem}.{extension}"
 
 
-def _extract_email_body_text(msg) -> str:
+def _select_email_body(msg) -> tuple[str, bytes, str] | None:
+    plain_text, html_text = _extract_email_body_parts(msg)
+    cid_map = _extract_cid_data_uris(msg) if html_text else {}
+
+    if html_text:
+        html_text = _inline_cid_images(html_text, cid_map)
+        html_clean = html_to_text(html_text)
+        if html_clean.strip():
+            if (
+                plain_text
+                and (not is_url_heavy_text(plain_text))
+                and _email_body_looks_like_receipt(plain_text)
+                and (not _email_body_looks_like_receipt(html_clean))
+            ):
+                return "text/plain", plain_text.encode("utf-8", errors="replace"), plain_text
+            return "text/html", html_text.encode("utf-8", errors="replace"), html_clean
+
+    if plain_text:
+        return "text/plain", plain_text.encode("utf-8", errors="replace"), plain_text
+    return None
+
+
+def _extract_email_body_parts(msg) -> tuple[str | None, str | None]:
     parts_plain: list[str] = []
     parts_html: list[str] = []
 
@@ -654,11 +651,45 @@ def _extract_email_body_text(msg) -> str:
             elif ctype == "text/html":
                 parts_html.append(text)
 
-    if parts_plain:
-        return "\n\n".join(parts_plain).strip()
-    if parts_html:
-        return _html_to_text("\n\n".join(parts_html))
-    return ""
+    plain = "\n\n".join(parts_plain).strip() if parts_plain else ""
+    html = "\n\n".join(parts_html).strip() if parts_html else ""
+    return plain or None, html or None
+
+
+def _extract_cid_data_uris(msg) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not getattr(msg, "is_multipart", lambda: False)():
+        return out
+
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        cid = str(part.get("Content-ID") or "").strip()
+        if not cid:
+            continue
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        ctype = str(part.get_content_type() or "").lower().strip()
+        if not ctype.startswith("image/"):
+            continue
+        cid_key = cid.strip("<>").strip().lower()
+        if not cid_key:
+            continue
+        b64 = b64encode(payload).decode("ascii")
+        out[cid_key] = f"data:{ctype};base64,{b64}"
+    return out
+
+
+def _inline_cid_images(html: str, cid_map: dict[str, str]) -> str:
+    if not html or not cid_map:
+        return html
+
+    def repl(match: re.Match[str]) -> str:
+        cid = str(match.group(1) or "").strip().strip("<>").strip().lower()
+        return cid_map.get(cid, match.group(0))
+
+    return re.sub(r"(?i)cid:([^'\"\\s>]+)", repl, html)
 
 
 def _email_body_looks_like_receipt(text: str) -> bool:
@@ -680,27 +711,4 @@ def _email_body_looks_like_receipt(text: str) -> bool:
 
 
 def _html_to_text(html: str) -> str:
-    from html import unescape
-
-    # Remove script/style blocks.
-    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", html)
-    # Basic block-to-newline conversions.
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</p\s*>", "\n\n", html)
-    html = re.sub(r"(?i)</div\s*>", "\n", html)
-    # Strip remaining tags.
-    html = re.sub(r"(?s)<[^>]+>", "", html)
-    html = unescape(html)
-
-    lines = [re.sub(r"\s+", " ", ln).strip() for ln in html.splitlines()]
-    out_lines: list[str] = []
-    last_blank = False
-    for ln in lines:
-        if not ln:
-            if not last_blank:
-                out_lines.append("")
-            last_blank = True
-            continue
-        out_lines.append(ln)
-        last_blank = False
-    return "\n".join(out_lines).strip()
+    return html_to_text(html, preserve_blank_lines=True)

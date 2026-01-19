@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import re
 import time
 import uuid
 from copy import copy
@@ -13,8 +12,14 @@ from pypdf import PdfReader, PdfWriter
 from sqlalchemy import select
 
 from serendipity_spend.core.db import SessionLocal
+from serendipity_spend.core.html_pdf import HtmlToPdfUnavailableError, render_html_to_pdf
 from serendipity_spend.core.logging import get_logger, log_event, log_exception, monotonic_ms
 from serendipity_spend.core.storage import get_storage
+from serendipity_spend.core.text import (
+    clean_email_body_text_for_export,
+    decode_text_bytes,
+    looks_like_html,
+)
 from serendipity_spend.modules.claims.models import Claim
 from serendipity_spend.modules.documents.models import EvidenceDocument, SourceFile
 from serendipity_spend.modules.expenses.models import ExpenseItem, ExpenseItemEvidence
@@ -318,6 +323,11 @@ def _build_supporting_pdf(
         body = get_storage().get(key=source.storage_key)
         reader = _source_file_to_pdf_reader(source=source, body=body)
         writer.append_pages_from_reader(reader)
+        try:
+            first_page_idx = len(writer.pages) - len(reader.pages)
+            writer.add_outline_item(f"{source.filename} [{source.id}]", first_page_idx)
+        except Exception:
+            pass
 
     out = io.BytesIO()
     writer.write(out)
@@ -387,37 +397,30 @@ def _source_file_to_pdf_reader(*, source: SourceFile, body: bytes) -> PdfReader:
 
 def _text_bytes_to_pdf(body: bytes, *, filename: str, content_type: str | None) -> bytes:
     ctype = (content_type or "").lower()
-    is_html = ctype.startswith("text/html") or filename.lower().endswith((".html", ".htm"))
     try:
-        text = body.decode("utf-8", errors="replace")
+        decoded = body.decode("utf-8", errors="replace")
     except Exception:
-        text = body.decode("latin-1", errors="replace")
-    if is_html:
-        text = _html_to_text(text)
+        decoded = body.decode("latin-1", errors="replace")
+
+    is_html_hint = ctype.startswith("text/html") or filename.lower().endswith((".html", ".htm"))
+    if is_html_hint or looks_like_html(decoded):
+        try:
+            return render_html_to_pdf(html=decoded)
+        except HtmlToPdfUnavailableError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    text = decode_text_bytes(
+        body=body,
+        filename=filename,
+        content_type=content_type,
+        preserve_blank_lines=True,
+    )
+    if filename.lower().startswith("email-body"):
+        cleaned = clean_email_body_text_for_export(text)
+        text = cleaned or "(Email body omitted: link-only / boilerplate content)"
     return _text_to_pdf(text)
-
-
-def _html_to_text(html: str) -> str:
-    from html import unescape
-
-    html = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", html)
-    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
-    html = re.sub(r"(?i)</p\s*>", "\n\n", html)
-    html = re.sub(r"(?i)</div\s*>", "\n", html)
-    html = re.sub(r"(?s)<[^>]+>", "", html)
-    html = unescape(html)
-    lines = [re.sub(r"\s+", " ", ln).strip() for ln in html.splitlines()]
-    out_lines: list[str] = []
-    last_blank = False
-    for ln in lines:
-        if not ln:
-            if not last_blank:
-                out_lines.append("")
-            last_blank = True
-            continue
-        out_lines.append(ln)
-        last_blank = False
-    return "\n".join(out_lines).strip()
 
 
 def _text_to_pdf(text: str) -> bytes:
