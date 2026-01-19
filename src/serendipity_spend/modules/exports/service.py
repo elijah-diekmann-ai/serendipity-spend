@@ -190,13 +190,12 @@ def _build_reimbursement_xlsx(
     if len(items) > max_data_rows and max_data_rows > 0:
         extra_rows = len(items) - max_data_rows
         _insert_styled_rows(
-            ws,
+            ws=ws,
             insert_at_row=total_row,
             count=extra_rows,
             style_from_row=total_row - 1,
         )
         total_row += extra_rows
-        _update_total_formulas(ws, total_row=total_row, data_start_row=data_start_row)
 
     row = data_start_row
     for item in sorted(items, key=lambda i: (i.transaction_date or date.min, i.created_at)):
@@ -218,6 +217,12 @@ def _build_reimbursement_xlsx(
             ws.cell(row=row, column=policy_col, value=_format_policy_flags(flags))
 
         row += 1
+    _update_total_formulas(
+        ws=ws,
+        total_row=total_row,
+        data_start_row=data_start_row,
+        data_end_row=data_start_row + max(len(items) - 1, 0),
+    )
 
     out = io.BytesIO()
     wb.save(out)
@@ -267,7 +272,7 @@ def _insert_styled_rows(*, ws, insert_at_row: int, count: int, style_from_row: i
     ws.insert_rows(insert_at_row, amount=count)
     for offset in range(count):
         target_row = insert_at_row + offset
-        _copy_row_style(ws, source_row=style_from_row, target_row=target_row)
+        _copy_row_style(ws=ws, source_row=style_from_row, target_row=target_row)
 
 
 def _copy_row_style(*, ws, source_row: int, target_row: int) -> None:
@@ -283,8 +288,8 @@ def _copy_row_style(*, ws, source_row: int, target_row: int) -> None:
         target_cell.alignment = copy(source_cell.alignment)
 
 
-def _update_total_formulas(*, ws, total_row: int, data_start_row: int) -> None:
-    data_end_row = max(total_row - 1, data_start_row)
+def _update_total_formulas(*, ws, total_row: int, data_start_row: int, data_end_row: int) -> None:
+    data_end_row = max(data_end_row, data_start_row)
     for col_letter in ("C", "D", "E", "F", "H"):
         cell = ws[f"{col_letter}{total_row}"]
         if isinstance(cell.value, str) and cell.value.startswith("=SUM("):
