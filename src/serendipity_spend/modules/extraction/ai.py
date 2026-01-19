@@ -297,7 +297,7 @@ def extract_receipt_fields(text: str) -> dict[str, Any] | None:
     """
     Best-effort AI extraction of core receipt fields (with provenance).
 
-    Returns a dict with keys: vendor, transaction_date, total, category.
+    Returns a dict with keys: vendor, transaction_date, total, category, and optional components.
     Each value is an object containing `value` (or amount/currency), `confidence`,
     and `evidence_lines` (line numbers from the provided numbered text).
     """
@@ -338,12 +338,26 @@ def extract_receipt_fields(text: str) -> dict[str, Any] | None:
                     'number, "evidence_lines": number[]},\n'
                     '  "category": {"value": one_of['
                     + ", ".join(sorted(_ALLOWED_CATEGORIES))
-                    + "]|null, \"confidence\": number, \"evidence_lines\": number[]}\n"
+                    + "]|null, \"confidence\": number, \"evidence_lines\": number[]},\n"
+                    '  "components": {\n'
+                    '    "subtotal": {"amount": string|null, "currency": string|null, '
+                    '"confidence": number, "evidence_lines": number[]},\n'
+                    '    "taxes_fees": {"amount": string|null, "currency": string|null, '
+                    '"confidence": number, "evidence_lines": number[]},\n'
+                    '    "tip": {"amount": string|null, "currency": string|null, '
+                    '"confidence": number, "evidence_lines": number[]},\n'
+                    '    "nightly_rate": {"amount": string|null, "currency": string|null, '
+                    '"confidence": number, "evidence_lines": number[]}\n'
+                    "  }\n"
                     "}\n\n"
                     "Rules:\n"
                     "- Currency MUST be an ISO-4217 code.\n"
                     "- Amount MUST be the receipt total/grand total/amount charged "
                     "(not a tax/subtotal).\n"
+                    "- components are optional breakdown parts; only return values explicitly "
+                    "present in the text (never infer).\n"
+                    "- If a component value is null, set confidence to 0 and "
+                    "evidence_lines to [].\n"
                     "- evidence_lines MUST reference the line numbers you used.\n"
                     "- If value is null, set confidence to 0 and evidence_lines to [].\n\n"
                     "Numbered receipt text:\n"
@@ -484,6 +498,41 @@ def _sanitize_receipt_fields(obj: dict[str, Any]) -> dict[str, Any] | None:
             "confidence": _confidence(total_f),
             "evidence_lines": _evidence_lines(total_f),
         }
+
+    def _sanitize_component(field: dict[str, Any]) -> dict[str, Any] | None:
+        amount_val = field.get("amount")
+        currency_val = field.get("currency")
+        amount_s: str | None = None
+        if isinstance(amount_val, (int, float, str)):
+            try:
+                amt = Decimal(str(amount_val).strip().replace(",", ""))
+                if amt > Decimal("0"):
+                    amount_s = str(amt.quantize(Decimal("0.01")))
+            except (InvalidOperation, ValueError):
+                amount_s = None
+        cur_norm = normalize_currency(currency_val) if isinstance(currency_val, str) else None
+        evidence_lines = _evidence_lines(field)
+        if not amount_s or not cur_norm or not evidence_lines:
+            return None
+        return {
+            "amount": amount_s,
+            "currency": cur_norm,
+            "confidence": _confidence(field),
+            "evidence_lines": evidence_lines,
+        }
+
+    components_raw = obj.get("components")
+    if isinstance(components_raw, dict):
+        components_out: dict[str, Any] = {}
+        for key in ("subtotal", "taxes_fees", "tip", "nightly_rate"):
+            raw = components_raw.get(key)
+            if not isinstance(raw, dict):
+                continue
+            candidate = _sanitize_component(raw)
+            if candidate:
+                components_out[key] = candidate
+        if components_out:
+            out["components"] = components_out
 
     category_f = _get_field("category")
     category_val = category_f.get("value")

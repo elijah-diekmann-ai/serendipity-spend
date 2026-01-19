@@ -1283,6 +1283,17 @@ def _maybe_auto_fx(*, session, claim: Claim) -> None:
 
     from serendipity_spend.modules.fx.service import auto_upsert_fx_rates
 
+    pending_items = list(
+        session.scalars(
+            select(ExpenseItem).where(
+                ExpenseItem.claim_id == claim.id,
+                ExpenseItem.amount_home_amount.is_(None),
+                ExpenseItem.amount_original_currency.in_(sorted(missing)),
+            )
+        )
+    )
+    pending_item_ids = [it.id for it in pending_items]
+
     start = time.monotonic()
     log_event(
         logger,
@@ -1308,6 +1319,41 @@ def _maybe_auto_fx(*, session, claim: Claim) -> None:
             skipped=sorted(skipped),
             duration_ms=monotonic_ms(start),
         )
+        if pending_item_ids:
+            refreshed = list(
+                session.scalars(select(ExpenseItem).where(ExpenseItem.id.in_(pending_item_ids)))
+            )
+            updated: list[dict] = []
+            still_pending = 0
+            for it in refreshed:
+                if (
+                    it.amount_home_amount is None
+                    and it.amount_original_currency.upper() != it.amount_home_currency.upper()
+                ):
+                    still_pending += 1
+                    continue
+                updated.append(
+                    {
+                        "expense_item_id": str(it.id),
+                        "amount_original_amount": it.amount_original_amount,
+                        "amount_original_currency": it.amount_original_currency,
+                        "amount_home_amount": it.amount_home_amount,
+                        "amount_home_currency": it.amount_home_currency,
+                        "fx_rate_to_home": it.fx_rate_to_home,
+                    }
+                )
+            sample = updated[:25]
+            log_event(
+                logger,
+                "fx.apply_to_items.finish",
+                claim_id=str(claim.id),
+                to_currency=to_currency,
+                pending_items=len(pending_item_ids),
+                updated_items=len(updated),
+                still_pending_items=still_pending,
+                updated_items_sample=sample,
+                updated_items_sample_truncated=len(updated) > len(sample),
+            )
     except Exception:
         log_exception(
             logger,
@@ -1409,25 +1455,26 @@ def _upsert_item_and_link_evidence(
     if not existing_link:
         session.add(ExpenseItemEvidence(expense_item_id=item.id, evidence_document_id=evidence.id))
 
-    log_event(
-        logger,
-        "expense_item.upsert",
-        claim_id=str(claim.id),
-        expense_item_id=str(item.id),
-        evidence_document_id=str(evidence.id),
-        source_file_id=str(evidence.source_file_id),
-        dedupe_key=dedupe_key,
-        vendor=parsed.vendor,
-        vendor_reference=parsed.vendor_reference,
-        receipt_type=item.receipt_type,
-        category=item.category,
-        description=item.description,
-        transaction_date=item.transaction_date,
-        amount_original_amount=item.amount_original_amount,
-        amount_original_currency=item.amount_original_currency,
-        amount_home_amount=item.amount_home_amount,
-        amount_home_currency=item.amount_home_currency,
-        fx_rate_to_home=item.fx_rate_to_home,
+        log_event(
+            logger,
+            "expense_item.upsert",
+            claim_id=str(claim.id),
+            expense_item_id=str(item.id),
+            evidence_document_id=str(evidence.id),
+            source_file_id=str(evidence.source_file_id),
+            dedupe_key=dedupe_key,
+            vendor=parsed.vendor,
+            vendor_reference=parsed.vendor_reference,
+            receipt_type=item.receipt_type,
+            category=item.category,
+            description=item.description,
+            transaction_date=item.transaction_date,
+            transaction_at=item.transaction_at,
+            amount_original_amount=item.amount_original_amount,
+            amount_original_currency=item.amount_original_currency,
+            amount_home_amount=item.amount_home_amount,
+            amount_home_currency=item.amount_home_currency,
+            fx_rate_to_home=item.fx_rate_to_home,
         fx_source=fx_source,
         fx_pending=bool(
             item.amount_home_amount is None
@@ -1986,7 +2033,7 @@ def _get_cached_receipt_ai(session, *, text_hash: str) -> dict | None:
     )
     if not cached:
         return None
-    if cached.schema_version != 1:
+    if cached.schema_version != 2:
         return None
     if not isinstance(cached.response_json, dict):
         return None
@@ -2002,7 +2049,7 @@ def _upsert_receipt_ai_cache(session, *, text_hash: str, response_json: dict) ->
             text_hash=text_hash,
             provider="openai",
             model=str(settings.openai_model or ""),
-            schema_version=1,
+            schema_version=2,
             response_json=response_json,
         )
         try:
@@ -2018,7 +2065,7 @@ def _upsert_receipt_ai_cache(session, *, text_hash: str, response_json: dict) ->
                 return
     cached.provider = "openai"
     cached.model = str(settings.openai_model or "")
-    cached.schema_version = 1
+    cached.schema_version = 2
     cached.response_json = response_json
     session.add(cached)
     session.flush()
@@ -2129,6 +2176,75 @@ def _parse_receipt_with_ai(
     if not category and inferred_category:
         category = inferred_category
     metadata.update(policy_metadata)
+
+    raw_components = ai.get("components") if isinstance(ai, dict) else None
+    if isinstance(raw_components, dict):
+        components: dict[str, dict] = {}
+        components_validated: dict[str, bool] = {}
+        components_for_sum: dict[str, Decimal] = {}
+
+        for key in ("subtotal", "taxes_fees", "tip", "nightly_rate"):
+            field = raw_components.get(key)
+            if not isinstance(field, dict):
+                continue
+            cur = field.get("currency")
+            amt = field.get("amount")
+            if not isinstance(cur, str) or not isinstance(amt, str):
+                continue
+            cur_norm_comp = normalize_currency(cur)
+            if not cur_norm_comp:
+                continue
+            dec = _parse_decimal_amount(amt)
+            if dec is None:
+                continue
+            dec = dec.quantize(Decimal("0.01"))
+
+            validated = False
+            evidence_lines = field.get("evidence_lines")
+            if isinstance(evidence_lines, list) and evidence_lines:
+                snippet = _snippet_from_line_refs(text, evidence_lines=evidence_lines)
+                candidates = _extract_currency_amount_candidates(snippet)
+                for cand_cur, cand_amt in candidates:
+                    if cand_amt != dec:
+                        continue
+                    if cand_cur == cur_norm_comp:
+                        validated = True
+                        break
+                    if cand_cur == "XXX" and cur_norm_comp != "XXX":
+                        validated = True
+                        break
+
+            components[key] = {"amount": str(dec), "currency": cur_norm_comp}
+            components_validated[key] = validated
+            if validated and cur_norm_comp == cur_norm:
+                components_for_sum[key] = dec
+
+        if components:
+            metadata["ai_receipt_components"] = components
+            sum_payload: dict = {"fields": components_validated}
+
+            base_key = "subtotal" if "subtotal" in components_for_sum else None
+            if base_key is None and "nightly_rate" in components_for_sum:
+                base_key = "nightly_rate"
+            if base_key is not None:
+                sum_keys: list[str] = [base_key]
+                sum_amount = components_for_sum[base_key]
+                for k in ("taxes_fees", "tip"):
+                    if k in components_for_sum:
+                        sum_keys.append(k)
+                        sum_amount += components_for_sum[k]
+                if len(sum_keys) >= 2:
+                    total_q = amount.quantize(Decimal("0.01"))
+                    diff = (sum_amount - total_q).quantize(Decimal("0.01"))
+                    sum_payload["sum"] = {
+                        "components": sum_keys,
+                        "amount": str(sum_amount.quantize(Decimal("0.01"))),
+                        "currency": cur_norm,
+                        "matches_total": abs(diff) <= Decimal("0.01"),
+                        "diff": str(diff),
+                    }
+
+            metadata["ai_receipt_components_validated"] = sum_payload
 
     return (
         _GenericParsedExpense(
@@ -2625,6 +2741,65 @@ def _extract_hotel_nights(text: str) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _extract_currency_amount_candidates(text: str) -> list[tuple[str, Decimal]]:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    out: list[tuple[str, Decimal]] = []
+
+    def add_candidates_from_line(ln: str) -> None:
+        for m in re.finditer(
+            r"\b([A-Z]{3})\s*(?:CA\$|US\$|\$|£|€)?\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])(?=[^\d]|$)",
+            ln,
+        ):
+            cur, amt = m.groups()
+            cur_norm = normalize_currency(cur)
+            if not cur_norm:
+                continue
+            amount = _parse_decimal_amount(amt)
+            if amount is None:
+                continue
+            out.append((cur_norm, amount.quantize(Decimal("0.01"))))
+
+        for m in re.finditer(
+            r"(CA\$|US\$|\$|£|€)\s*([0-9][0-9,.'\u202f\xa0 ]*[0-9])(?=[^\d]|$)",
+            ln,
+        ):
+            sym, amt = m.groups()
+            cur = {"$": "XXX", "US$": "USD", "CA$": "CAD", "£": "GBP", "€": "EUR"}.get(sym)
+            cur_norm = normalize_currency(cur)
+            if not cur_norm:
+                continue
+            amount = _parse_decimal_amount(amt)
+            if amount is None:
+                continue
+            out.append((cur_norm, amount.quantize(Decimal("0.01"))))
+
+        for m in re.finditer(
+            r"\b([0-9][0-9,.'\u202f\xa0 ]*[0-9])\s*([A-Z]{3})\b",
+            ln,
+        ):
+            amt, cur = m.groups()
+            cur_norm = normalize_currency(cur)
+            if not cur_norm:
+                continue
+            amount = _parse_decimal_amount(amt)
+            if amount is None:
+                continue
+            out.append((cur_norm, amount.quantize(Decimal("0.01"))))
+
+    for ln in lines:
+        add_candidates_from_line(ln)
+
+    seen: set[tuple[str, Decimal]] = set()
+    deduped: list[tuple[str, Decimal]] = []
+    for cur, amt in out:
+        key = (cur, amt)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
 
 
 def _extract_total_amount(text: str) -> tuple[str, Decimal] | None:
