@@ -208,19 +208,7 @@
       {% include "claim_detail/_fx_card.html" %}
 
       <!-- Downloads (after export) -->
-      {% if exports|length > 0 %}
-      <div class="sidebar-card">
-        <h3 class="sidebar-label">Downloads</h3>
-        <div class="export-links">
-          {% for e in exports %}
-            {% if e.status.value == 'COMPLETED' %}
-              {% if e.summary_xlsx_key %}<a href="/app/exports/{{ e.id }}/download/summary" class="export-link">Summary.xlsx</a>{% endif %}
-              {% if e.supporting_pdf_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.pdf</a>{% elif e.supporting_zip_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.zip</a>{% endif %}
-            {% endif %}
-          {% endfor %}
-        </div>
-      </div>
-      {% endif %}
+      {% include "claim_detail/_downloads_slot.html" %}
 
       <!-- Actions -->
       <div class="sidebar-card sidebar-card--muted">

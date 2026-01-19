@@ -55,7 +55,7 @@ from serendipity_spend.modules.expenses.service import (
     list_items,
     update_expense_item,
 )
-from serendipity_spend.modules.exports.models import ExportRun
+from serendipity_spend.modules.exports.models import ExportRun, ExportStatus
 from serendipity_spend.modules.exports.service import create_export_run
 from serendipity_spend.modules.fx.models import FxRate
 from serendipity_spend.modules.fx.service import (
@@ -299,6 +299,8 @@ def _build_claim_detail_context(
 
     poll_processing = claim.status == ClaimStatus.PROCESSING or any(
         d.status in {SourceFileStatus.UPLOADED, SourceFileStatus.PROCESSING} for d in docs
+    ) or any(
+        e.status in {ExportStatus.QUEUED, ExportStatus.RUNNING} for e in exports
     )
 
     # Filter out:
@@ -900,6 +902,7 @@ def claim_detail_live_fragments(
             "include_expenses": True,
             "include_policy": True,
             "include_fx": True,
+            "include_downloads": True,
             "include_live_poll": True,
         }
     )

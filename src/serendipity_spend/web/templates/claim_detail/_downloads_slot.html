@@ -1,0 +1,25 @@
+<div id="downloads-slot" {% if oob %}hx-swap-oob="outerHTML"{% endif %}>
+  {% if exports|length > 0 %}
+  <div class="sidebar-card">
+    <h3 class="sidebar-label">Downloads</h3>
+    <div class="export-links">
+      {% set latest = exports[0] %}
+      {% if latest.status.value in ['QUEUED', 'RUNNING'] %}
+        <div class="muted" style="font-size:12px;">Export generating… links will appear automatically.</div>
+      {% elif latest.status.value == 'FAILED' %}
+        <div class="callout warning" style="font-size:12px;">
+          Export failed{% if latest.error_message %}: {{ latest.error_message|truncate(200) }}{% endif %}
+        </div>
+      {% endif %}
+
+      {% for e in exports %}
+        {% if e.status.value == 'COMPLETED' %}
+          {% if e.summary_xlsx_key %}<a href="/app/exports/{{ e.id }}/download/summary" class="export-link">Summary.xlsx</a>{% endif %}
+          {% if e.supporting_pdf_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.pdf</a>{% elif e.supporting_zip_key %}<a href="/app/exports/{{ e.id }}/download/supporting" class="export-link">Supporting_Documents.zip</a>{% endif %}
+        {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+
